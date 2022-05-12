@@ -4,7 +4,7 @@
 #include "netutils.h"
 #include "dnsutils.h"
 #include "dnlutils.h"
-#include "maputils.h"
+#include "uthash.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -20,8 +20,12 @@
 #include <sys/epoll.h>
 #include <arpa/inet.h>
 #include <netinet/in.h>
-#include <linux/limits.h>
 #undef _GNU_SOURCE
+
+/* limits.h */
+#ifndef PATH_MAX
+  #define PATH_MAX 4096
+#endif
 
 /* left-16-bit:MSGID; right-16-bit:IDX/MARK */
 #define CHINADNS1_IDX 0
@@ -39,54 +43,84 @@
 #define SOCKBUFF_MAXSIZE DNS_PACKET_MAXSIZE
 #define PORTSTR_MAXLEN 6 /* "65535\0" (including '\0') */
 #define ADDRPORT_STRLEN (INET6_ADDRSTRLEN + PORTSTR_MAXLEN) /* "addr#port\0" */
-#define CHINADNS_VERSION "ChinaDNS-NG v1.0-beta.17 <https://github.com/zfl9/chinadns-ng>"
+#define CHINADNS_VERSION "ChinaDNS-NG v1.0-beta.23 <https://github.com/zfl9/chinadns-ng>"
 
-/* whether it is a verbose mode */
+/* is enable verbose logging */
 #define IF_VERBOSE if (g_verbose)
 
+/* dnl match result */
+#define DNL_MRESULT_NOMATCH 0 // did not match
+#define DNL_MRESULT_GFWLIST 1 // hit the gfwlist
+#define DNL_MRESULT_CHNLIST 2 // hit the chnlist
+
+/* dns query context structure */
+typedef struct {
+    uint16_t   unique_msgid;  /* [key] globally unique msgid */
+    uint16_t   origin_msgid;  /* [value] associated original msgid */
+    int        query_timerfd; /* [value] dns query timeout timer-fd */
+    void      *trustdns_buf;  /* [value] storage reply from trust-dns */
+    bool       chinadns_got;  /* [value] received reply from china-dns */
+    uint8_t    dnlmatch_ret;  /* [value] dnl_ismatch(dname) ret-value */
+    skaddr6_t  source_addr;   /* [value] associated client socket addr */
+    myhash_hh  hh;            /* [metadata] used internally by `uthash` */
+} queryctx_t;
+
 /* static global variable declaration */
-static int             g_epollfd                                          = -1;
-static bool            g_verbose                                          = false;
-static bool            g_reuse_port                                       = false;
-static bool            g_fair_mode                                        = false; /* default: fast-mode */
-static uint8_t         g_repeat_times                                     = 1; /* used by trust-dns only */
-static const char     *g_gfwlist_fname                                    = NULL; /* gfwlist dnamelist filename */
-static const char     *g_chnlist_fname                                    = NULL; /* chnlist dnamelist filename */
-static bool            g_gfwlist_first                                    = true; /* match gfwlist dnamelist first */
-       bool            g_noip_as_chnip                                    = false; /* default: see as not-chnip */
-       char            g_ipset_setname4[IPSET_MAXNAMELEN]                 = "chnroute"; /* ipset setname for ipv4 */
-       char            g_ipset_setname6[IPSET_MAXNAMELEN]                 = "chnroute6"; /* ipset setname for ipv6 */
-static char            g_bind_addr[INET6_ADDRSTRLEN]                      = "127.0.0.1";
-static sock_port_t     g_bind_port                                        = 65353;
-static inet6_skaddr_t  g_bind_skaddr                                      = {0};
-static int             g_bind_socket                                      = -1;
-static int             g_remote_sockets[SERVER_MAXCOUNT]                  = {-1, -1, -1, -1};
-static char            g_remote_servers[SERVER_MAXCOUNT][ADDRPORT_STRLEN] = {"114.114.114.114#53", "", "8.8.8.8#53", ""};
-static inet6_skaddr_t  g_remote_skaddrs[SERVER_MAXCOUNT]                  = {{0}};
-static char            g_socket_buffer[SOCKBUFF_MAXSIZE]                  = {0};
-static time_t          g_upstream_timeout_sec                             = 3;
-static uint16_t        g_current_message_id                               = 0;
-static hashmap_t      *g_message_id_hashmap                               = NULL;
-static char            g_domain_name_buffer[DNS_DOMAIN_NAME_MAXLEN]       = {0};
-static char            g_ipaddrstring_buffer[INET6_ADDRSTRLEN]            = {0};
+static int         g_epollfd                                          = -1;
+static bool        g_verbose                                          = false;
+static bool        g_reuse_port                                       = false;
+static bool        g_fair_mode                                        = false; /* default: fast-mode */
+static uint8_t     g_repeat_times                                     = 1; /* used by trust-dns only */
+static const char *g_gfwlist_fname                                    = NULL; /* gfwlist dnamelist filename */
+static const char *g_chnlist_fname                                    = NULL; /* chnlist dnamelist filename */
+static bool        g_gfwlist_first                                    = true; /* match gfwlist dnamelist first */
+       bool        g_noip_as_chnip                                    = false; /* default: see as not-china-ip */
+       char        g_ipset_setname4[IPSET_MAXNAMELEN]                 = "chnroute"; /* ipset setname for ipv4 */
+       char        g_ipset_setname6[IPSET_MAXNAMELEN]                 = "chnroute6"; /* ipset setname for ipv6 */
+static char        g_bind_ipstr[INET6_ADDRSTRLEN]                     = "127.0.0.1";
+static portno_t    g_bind_portno                                      = 65353;
+static skaddr6_t   g_bind_skaddr                                      = {0};
+static int         g_bind_sockfd                                      = -1;
+static int         g_remote_sockfds[SERVER_MAXCOUNT]                  = {-1, -1, -1, -1};
+static char        g_remote_ipports[SERVER_MAXCOUNT][ADDRPORT_STRLEN] = {"223.5.5.5#53", "", "9.9.9.9#9953", ""};
+static skaddr6_t   g_remote_skaddrs[SERVER_MAXCOUNT]                  = {{0}};
+static char        g_socket_buffer[SOCKBUFF_MAXSIZE]                  = {0};
+static time_t      g_upstream_timeout_sec                             = 5;
+static queryctx_t *g_query_context_hashtbl                            = NULL;
+static uint8_t     g_fake_ip4[IPV4_BINADDR_LEN]                       = {0};
+static uint8_t     g_fake_ip6[IPV6_BINADDR_LEN]                       = {0};
+static bool        g_fake_ip_enable                                   = false;
+static bool        g_disable_ipv4_aaaa                                = false;
+static const char *g_hosts_fname                                      = NULL; /* hosts filename */
+static int32_t     g_hosts_ttl                                        = 3600; /* hosts reply ttl */
+
+/* hash table (head entry) */
+static dnlentry_t *g_gfwlist_headentry = NULL;
+static dnlentry_t *g_chnlist_headentry = NULL;
+static hostsv4entry_t *g_hosts_v4_headentry = NULL;
+static hostsv6entry_t *g_hosts_v6_headentry = NULL;
 
 /* print command help information */
 static void print_command_help(void) {
     printf("usage: chinadns-ng <options...>. the existing options are as follows:\n"
-           " -b, --bind-addr <ip-address>         listen address, default: 127.0.0.1\n" 
+           " -b, --bind-addr <ip-address>         listen address, default: 127.0.0.1\n"
            " -l, --bind-port <port-number>        listen port number, default: 65353\n"
-           " -c, --china-dns <ip[#port],...>      china dns server, default: <114DNS>\n"
-           " -t, --trust-dns <ip[#port],...>      trust dns server, default: <GoogleDNS>\n"
+           " -c, --china-dns <ip[#port],...>      china dns server, default: <ALIDNS>\n"
+           " -t, --trust-dns <ip[#port],...>      trust dns server\n"
            " -4, --ipset-name4 <ipv4-setname>     ipset ipv4 set name, default: chnroute\n"
            " -6, --ipset-name6 <ipv6-setname>     ipset ipv6 set name, default: chnroute6\n"
            " -g, --gfwlist-file <file-path>       filepath of gfwlist, '-' indicate stdin\n"
            " -m, --chnlist-file <file-path>       filepath of chnlist, '-' indicate stdin\n"
-           " -o, --timeout-sec <query-timeout>    timeout of the upstream dns, default: 3\n"
+           " -o, --timeout-sec <query-timeout>    timeout of the upstream dns, default: 5\n"
            " -p, --repeat-times <repeat-times>    it is only used for trustdns, default: 1\n"
            " -M, --chnlist-first                  match chnlist first, default: <disabled>\n"
            " -f, --fair-mode                      enable `fair` mode, default: <fast-mode>\n"
            " -r, --reuse-port                     enable SO_REUSEPORT, default: <disabled>\n"
            " -n, --noip-as-chnip                  accept reply without ipaddr (A/AAAA query)\n"
+           " -a, --fake-ip <fake-ip4,fake-ip6>    return the fake ip for all foreign website\n"
+           " -s, --hosts-file <file-path>         hosts file\n"
+           " -S, --hosts-ttl <ttl>                hosts ttl\n"
+           " -A, --disable-aaaa                   disable AAAA in ipv4 env, default: <disabled>\n"
            " -v, --verbose                        print the verbose log, default: <disabled>\n"
            " -V, --version                        print `chinadns-ng` version number and exit\n"
            " -h, --help                           print `chinadns-ng` help information and exit\n"
@@ -102,7 +136,7 @@ static void parse_dns_server_opt(char *option_argval, bool is_chinadns) {
             printf("[parse_dns_server_opt] %s dns servers max count is 2\n", is_chinadns ? "china" : "trust");
             goto PRINT_HELP_AND_EXIT;
         }
-        sock_port_t server_port = 53;
+        portno_t server_port = 53;
         char *hashsign_ptr = strchr(server_str, '#');
         if (hashsign_ptr) {
             *hashsign_ptr = 0; ++hashsign_ptr;
@@ -110,7 +144,7 @@ static void parse_dns_server_opt(char *option_argval, bool is_chinadns) {
                 printf("[parse_dns_server_opt] port number max length is 5: %s\n", hashsign_ptr);
                 goto PRINT_HELP_AND_EXIT;
             }
-            server_port = strtol(hashsign_ptr, NULL, 10);
+            server_port = strtoul(hashsign_ptr, NULL, 10);
             if (server_port == 0) {
                 printf("[parse_dns_server_opt] invalid server port number: %s\n", hashsign_ptr);
                 goto PRINT_HELP_AND_EXIT;
@@ -120,19 +154,14 @@ static void parse_dns_server_opt(char *option_argval, bool is_chinadns) {
             printf("[parse_dns_server_opt] ip address max length is 45: %s\n", server_str);
             goto PRINT_HELP_AND_EXIT;
         }
-        int index = is_chinadns ? server_cnt - 1 : server_cnt + 1;
-        switch (get_addrstr_family(server_str)) {
-            case AF_INET:
-                build_ipv4_addr((void *)&g_remote_skaddrs[index], server_str, server_port);
-                break;
-            case AF_INET6:
-                build_ipv6_addr((void *)&g_remote_skaddrs[index], server_str, server_port);
-                break;
-            default:
-                printf("[parse_dns_server_opt] invalid server ip address: %s\n", server_str);
-                goto PRINT_HELP_AND_EXIT;
+        int family = get_ipstr_family(server_str);
+        if (family == -1) {
+            printf("[parse_dns_server_opt] invalid server ip address: %s\n", server_str);
+            goto PRINT_HELP_AND_EXIT;
         }
-        sprintf(g_remote_servers[index], "%s#%hu", server_str, server_port);
+        int index = is_chinadns ? server_cnt - 1 : server_cnt + 1;
+        sprintf(g_remote_ipports[index], "%s#%hu", server_str, server_port);
+        build_socket_addr(family, &g_remote_skaddrs[index], server_str, server_port);
     }
     return;
 PRINT_HELP_AND_EXIT:
@@ -142,7 +171,7 @@ PRINT_HELP_AND_EXIT:
 
 /* parse and check command arguments */
 static void parse_command_args(int argc, char *argv[]) {
-    const char *optstr = ":b:l:c:t:4:6:g:m:o:p:MfrnvVh";
+    const char *optstr = ":b:l:c:t:4:6:g:m:o:p:a:s:S:AMfrnvVh";
     const struct option options[] = {
         {"bind-addr",     required_argument, NULL, 'b'},
         {"bind-port",     required_argument, NULL, 'l'},
@@ -154,6 +183,10 @@ static void parse_command_args(int argc, char *argv[]) {
         {"chnlist-file",  required_argument, NULL, 'm'},
         {"timeout-sec",   required_argument, NULL, 'o'},
         {"repeat-times",  required_argument, NULL, 'p'},
+        {"fake-ip",       required_argument, NULL, 'a'},
+        {"hosts-file",    required_argument, NULL, 's'},
+        {"hosts-ttl",     required_argument, NULL, 'S'},
+        {"disable-aaaa",  no_argument,       NULL, 'A'},
         {"chnlist-first", no_argument,       NULL, 'M'},
         {"fair-mode",     no_argument,       NULL, 'f'},
         {"reuse-port",    no_argument,       NULL, 'r'},
@@ -166,8 +199,8 @@ static void parse_command_args(int argc, char *argv[]) {
     opterr = 0;
     int optindex = -1;
     int shortopt = -1;
-    char *chinadns_optarg = NULL;
-    char *trustdns_optarg = NULL;
+    const char *chinadns_optarg = NULL;
+    const char *trustdns_optarg = NULL;
     while ((shortopt = getopt_long(argc, argv, optstr, options, &optindex)) != -1) {
         switch (shortopt) {
             case 'b':
@@ -175,19 +208,19 @@ static void parse_command_args(int argc, char *argv[]) {
                     printf("[parse_command_args] ip address max length is 45: %s\n", optarg);
                     goto PRINT_HELP_AND_EXIT;
                 }
-                if (get_addrstr_family(optarg) == -1) {
+                if (get_ipstr_family(optarg) == -1) {
                     printf("[parse_command_args] invalid listen ip address: %s\n", optarg);
                     goto PRINT_HELP_AND_EXIT;
                 }
-                strcpy(g_bind_addr, optarg);
+                strcpy(g_bind_ipstr, optarg);
                 break;
             case 'l':
                 if (strlen(optarg) + 1 > PORTSTR_MAXLEN) {
                     printf("[parse_command_args] port number max length is 5: %s\n", optarg);
                     goto PRINT_HELP_AND_EXIT;
                 }
-                g_bind_port = strtol(optarg, NULL, 10);
-                if (g_bind_port == 0) {
+                g_bind_portno = strtoul(optarg, NULL, 10);
+                if (g_bind_portno == 0) {
                     printf("[parse_command_args] invalid listen port number: %s\n", optarg);
                     goto PRINT_HELP_AND_EXIT;
                 }
@@ -227,18 +260,71 @@ static void parse_command_args(int argc, char *argv[]) {
                 g_chnlist_fname = optarg;
                 break;
             case 'o':
-                g_upstream_timeout_sec = strtol(optarg, NULL, 10);
+                g_upstream_timeout_sec = strtoul(optarg, NULL, 10);
                 if (g_upstream_timeout_sec <= 0) {
                     printf("[parse_command_args] invalid upstream timeout sec: %s\n", optarg);
                     goto PRINT_HELP_AND_EXIT;
                 }
                 break;
             case 'p':
-                g_repeat_times = strtol(optarg, NULL, 10);
-                if (g_repeat_times < 1) {
+                g_repeat_times = strtoul(optarg, NULL, 10);
+                if (g_repeat_times == 0) {
                     printf("[parse_command_args] repeat times min value is 1: %s\n", optarg);
                     goto PRINT_HELP_AND_EXIT;
                 }
+                break;
+            case 's':
+                if (strlen(optarg) + 1 > PATH_MAX) {
+                    printf("[parse_command_args] file path max length is 4095: %s\n", optarg);
+                    goto PRINT_HELP_AND_EXIT;
+                }
+                g_hosts_fname = optarg;
+                break;
+            case 'S':
+                if (strlen(optarg) + 1 > PATH_MAX) {
+                    printf("[parse_command_args] file path max length is 4095: %s\n", optarg);
+                    goto PRINT_HELP_AND_EXIT;
+                }
+                errno = 0;
+                g_hosts_ttl = strtol(optarg, NULL, 10);
+                if (errno != 0 || g_hosts_ttl <= 0) {
+                    printf("[parse_command_args] invalid ttl: %s\n", optarg);
+                    goto PRINT_HELP_AND_EXIT;
+                }
+                break;
+            case 'a': ;
+                char *sep = strchr(optarg, ',');
+                if (sep != NULL) {
+                    *sep = '\0';
+                    sep++;
+                }
+                bool is_v6;
+                uint8_t fake_ip[IPV6_BINADDR_LEN] = {0};
+                if (!ip_str_to_bin(optarg, fake_ip, &is_v6)) {
+                    printf("[parse_command_args] invalid fake ip address: %s\n", optarg);
+                    goto PRINT_HELP_AND_EXIT;
+                }
+                if (is_v6) {
+                    memcpy(g_fake_ip6, fake_ip, IPV6_BINADDR_LEN);
+                } else {
+                    memcpy(g_fake_ip4, fake_ip, IPV4_BINADDR_LEN);
+                }
+                memset(fake_ip, 0, sizeof(fake_ip));
+                if (sep != NULL) {
+                    if (!ip_str_to_bin(sep, fake_ip, &is_v6)) {
+                        printf("[parse_command_args] invalid fake ip address: %s\n", optarg);
+                        goto PRINT_HELP_AND_EXIT;
+                    }
+                    if (is_v6) {
+                        memcpy(g_fake_ip6, fake_ip, IPV6_BINADDR_LEN);
+                    } else {
+                        memcpy(g_fake_ip4, fake_ip, IPV4_BINADDR_LEN);
+                    }
+                }
+                g_fake_ip_enable = true;
+                break;
+            case 'A':
+                g_disable_ipv4_aaaa = true;
                 break;
             case 'M':
                 g_gfwlist_first = false;
@@ -280,24 +366,20 @@ static void parse_command_args(int argc, char *argv[]) {
         printf("[parse_command_args] gfwlist:%s and chnlist:%s are both STDIN\n", g_gfwlist_fname, g_chnlist_fname);
         goto PRINT_HELP_AND_EXIT;
     }
-    if (get_addrstr_family(g_bind_addr) == AF_INET) {
-        build_ipv4_addr((void *)&g_bind_skaddr, g_bind_addr, g_bind_port);
-    } else {
-        build_ipv6_addr((void *)&g_bind_skaddr, g_bind_addr, g_bind_port);
-    }
+    build_socket_addr(get_ipstr_family(g_bind_ipstr), &g_bind_skaddr, g_bind_ipstr, g_bind_portno);
     if (chinadns_optarg) {
         char dnsserver_optstring[strlen(chinadns_optarg) + 1];
         strcpy(dnsserver_optstring, chinadns_optarg);
         parse_dns_server_opt(dnsserver_optstring, true);
     } else {
-        build_ipv4_addr((void *)&g_remote_skaddrs[CHINADNS1_IDX], "114.114.114.114", 53);
+        build_socket_addr(AF_INET, &g_remote_skaddrs[CHINADNS1_IDX], "223.5.5.5", 53);
     }
     if (trustdns_optarg) {
         char dnsserver_optstring[strlen(trustdns_optarg) + 1];
         strcpy(dnsserver_optstring, trustdns_optarg);
         parse_dns_server_opt(dnsserver_optstring, false);
     } else {
-        build_ipv4_addr((void *)&g_remote_skaddrs[TRUSTDNS1_IDX], "8.8.8.8", 53);
+        build_socket_addr(AF_INET, &g_remote_skaddrs[TRUSTDNS1_IDX], "9.9.9.9", 9953);
     }
     return;
 PRINT_HELP_AND_EXIT:
@@ -307,46 +389,96 @@ PRINT_HELP_AND_EXIT:
 
 /* handle local socket readable event */
 static void handle_local_packet(void) {
-    inet6_skaddr_t source_addr = {0};
-    socklen_t source_addrlen = sizeof(inet6_skaddr_t);
-    ssize_t packet_len = recvfrom(g_bind_socket, g_socket_buffer, SOCKBUFF_MAXSIZE, 0, (void *)&source_addr, &source_addrlen);
-
-    if (packet_len < 0) {
-        if (errno == EAGAIN || errno == EINTR) return;
-        LOGERR("[handle_local_packet] failed to recv data from bind socket: (%d) %s", errno, strerror(errno));
+    static uint16_t current_unique_msgid = 0;
+    if (MYHASH_CNT(g_query_context_hashtbl) >= 65536) { /* range:0~65535, count:65536 */
+        LOGERR("[handle_local_packet] unique_msg_id is not enough, refused to serve");
         return;
     }
 
-    if (!dns_query_check(g_socket_buffer, packet_len, (g_verbose || g_gfwlist_fname || g_chnlist_fname) ? g_domain_name_buffer : NULL)) return;
+    skaddr6_t source_addr = {0};
+    socklen_t source_addrlen = sizeof(skaddr6_t);
+    ssize_t packet_len = recvfrom(g_bind_sockfd, g_socket_buffer, SOCKBUFF_MAXSIZE, 0, (void *)&source_addr, &source_addrlen);
 
-    IF_VERBOSE {
-        sock_port_t source_port = 0;
-        if (source_addr.sin6_family == AF_INET) {
-            parse_ipv4_addr((void *)&source_addr, g_ipaddrstring_buffer, &source_port);
-        } else {
-            parse_ipv6_addr((void *)&source_addr, g_ipaddrstring_buffer, &source_port);
+    if (packet_len < 0) {
+        if (errno != EAGAIN && errno != EWOULDBLOCK) {
+            LOGERR("[handle_local_packet] failed to recv data from bind socket: (%d) %s", errno, strerror(errno));
         }
-        LOGINF("[handle_local_packet] query [%s] from %s#%hu", g_domain_name_buffer, g_ipaddrstring_buffer, source_port);
+        return;
     }
 
-    uint16_t unique_msgid = g_current_message_id++;
+    uint16_t qtype = 0;
+    void *answer_ptr = NULL;
+    char domain_name_buffer[DNS_DOMAIN_NAME_MAXLEN] = {0};
+    char ipaddrstring_buffer[INET6_ADDRSTRLEN] = {0};
+    if (!dns_query_check(g_socket_buffer, packet_len, (g_verbose || g_gfwlist_fname || g_chnlist_fname || g_hosts_fname) ? domain_name_buffer : NULL, &qtype, &answer_ptr)) return;
+
+    IF_VERBOSE {
+        portno_t source_port = 0;
+        parse_socket_addr(&source_addr, ipaddrstring_buffer, &source_port);
+        LOGINF("[handle_local_packet] query [%s %d] from %s#%hu (%hu)", domain_name_buffer, qtype, ipaddrstring_buffer, source_port, current_unique_msgid);
+    }
+
+    bool response = false;
+    if (g_disable_ipv4_aaaa && qtype == DNS_RECORD_TYPE_AAAA && source_addr.sin6_family == AF_INET) {
+        response = true;
+        make_dns_reply_empty_domain(g_socket_buffer, &packet_len, answer_ptr);
+        IF_VERBOSE LOGINF("[handle_local_packet] to reply empty to domain %s", domain_name_buffer);
+    }
+
+    if (g_hosts_fname) {
+        hostsv4entry_t *v4_entry;
+        hostsv6entry_t *v6_entry;
+        char str[INET6_ADDRSTRLEN];
+        if (qtype == DNS_RECORD_TYPE_A && hosts_v4_ismatch(domain_name_buffer, g_hosts_v4_headentry, &v4_entry)) {
+            response = true;
+            make_dns_reply(g_socket_buffer, &packet_len, v4_entry->ip, false, answer_ptr, g_hosts_ttl);
+            IF_VERBOSE {
+                ip_bin_to_str(v4_entry->ip, false, str);
+                LOGINF("[handle_local_packet] to reply static ipv4 %s to domain %s", str, domain_name_buffer);
+            }
+        } else if (qtype == DNS_RECORD_TYPE_AAAA && hosts_v6_ismatch(domain_name_buffer, g_hosts_v6_headentry, &v6_entry)) {
+            response = true;
+            make_dns_reply(g_socket_buffer, &packet_len, v6_entry->ip, true, answer_ptr, g_hosts_ttl);
+            IF_VERBOSE {
+                ip_bin_to_str(v6_entry->ip, true, str);
+                LOGINF("[handle_local_packet] to reply static ipv6 %s to domain %s", str, domain_name_buffer);
+            }
+        }
+    }
+    if (response) {
+        if (sendto(g_bind_sockfd, g_socket_buffer, packet_len, 0, (void *)&source_addr, source_addrlen) < 0) {
+            portno_t source_port = 0;
+            parse_socket_addr(&source_addr, ipaddrstring_buffer, &source_port);
+            LOGERR("[handle_local_packet] failed to send dns reply packet to %s#%hu: (%d) %s", ipaddrstring_buffer, source_port, errno, strerror(errno));
+        }
+        return;
+    }
+
+    uint16_t unique_msgid = current_unique_msgid++;
     dns_header_t *dns_header = (dns_header_t *)g_socket_buffer;
     uint16_t origin_msgid = dns_header->id;
     dns_header->id = unique_msgid; /* replace with new msgid */
-    uint8_t dnlmatch_ret = (g_gfwlist_fname || g_chnlist_fname) ? dnl_ismatch(g_domain_name_buffer, g_gfwlist_first) : DNL_MRESULT_NOMATCH;
+    uint8_t dnlmatch_ret = DNL_MRESULT_NOMATCH;
+    if (g_gfwlist_fname && dnl_ismatch(domain_name_buffer, g_gfwlist_headentry)) {
+        dnlmatch_ret = DNL_MRESULT_GFWLIST;
+    } else if (g_chnlist_fname && dnl_ismatch(domain_name_buffer, g_chnlist_headentry)) {
+        dnlmatch_ret = DNL_MRESULT_CHNLIST;
+    }
 
     for (int i = 0; i < SERVER_MAXCOUNT; ++i) {
-        if (g_remote_sockets[i] < 0) continue;
+        if (g_remote_sockfds[i] < 0) continue;
         uint8_t repeat_times = 0;
         if (i == CHINADNS1_IDX || i == CHINADNS2_IDX) {
             repeat_times = (dnlmatch_ret == DNL_MRESULT_GFWLIST) ? 0 : 1;
         } else {
             repeat_times = (dnlmatch_ret == DNL_MRESULT_CHNLIST) ? 0 : g_repeat_times;
         }
-        socklen_t remote_addrlen = g_remote_skaddrs[i].sin6_family == AF_INET ? sizeof(inet4_skaddr_t) : sizeof(inet6_skaddr_t);
+        socklen_t remote_addrlen = g_remote_skaddrs[i].sin6_family == AF_INET ? sizeof(skaddr4_t) : sizeof(skaddr6_t);
         for (int j = 0; j < repeat_times; ++j) {
-            if (sendto(g_remote_sockets[i], g_socket_buffer, packet_len, 0, (void *)&g_remote_skaddrs[i], remote_addrlen) < 0) {
-                LOGERR("[handle_local_packet] failed to send dns query packet to %s: (%d) %s", g_remote_servers[i], errno, strerror(errno));
+            if (sendto(g_remote_sockfds[i], g_socket_buffer, packet_len, 0, (void *)&g_remote_skaddrs[i], remote_addrlen) < 0) {
+                LOGERR("[handle_local_packet] failed to send dns query packet to %s: (%d) %s", g_remote_ipports[i], errno, strerror(errno));
+            } else IF_VERBOSE {
+                LOGINF("[handle_local_packet] send [%s %hu] dns query to %s", domain_name_buffer, qtype, g_remote_ipports[i]);
             }
         }
     }
@@ -359,117 +491,155 @@ static void handle_local_packet(void) {
         return;
     }
 
-    hashmap_put(&g_message_id_hashmap, unique_msgid, origin_msgid, query_timerfd, dnlmatch_ret, &source_addr);
+    queryctx_t *context = malloc(sizeof(queryctx_t));
+    context->unique_msgid = unique_msgid;
+    context->origin_msgid = origin_msgid;
+    context->query_timerfd = query_timerfd;
+    context->trustdns_buf = NULL;
+    context->chinadns_got = !g_fair_mode;
+    context->dnlmatch_ret = dnlmatch_ret;
+    memcpy(&context->source_addr, &source_addr, sizeof(source_addr));
+    MYHASH_ADD(g_query_context_hashtbl, context, &context->unique_msgid, sizeof(context->unique_msgid));
 }
 
 /* handle remote socket readable event */
 static void handle_remote_packet(int index) {
-    int remote_socket = g_remote_sockets[index];
-    const char *remote_servers = g_remote_servers[index];
-    ssize_t packet_len = recvfrom(remote_socket, g_socket_buffer, SOCKBUFF_MAXSIZE, 0, NULL, NULL);
+    int remote_sockfd = g_remote_sockfds[index];
+    const char *remote_ipport = g_remote_ipports[index];
+    ssize_t packet_len = recvfrom(remote_sockfd, g_socket_buffer, SOCKBUFF_MAXSIZE, 0, NULL, NULL);
 
     if (packet_len < 0) {
-        if (errno == EAGAIN || errno == EINTR) return;
-        LOGERR("[handle_remote_packet] failed to recv data from %s: (%d) %s", remote_servers, errno, strerror(errno));
+        if (errno != EAGAIN && errno != EWOULDBLOCK) {
+            LOGERR("[handle_remote_packet] failed to recv data from %s: (%d) %s", remote_ipport, errno, strerror(errno));
+        }
+        return;
+    }
+    if (packet_len < (ssize_t)sizeof(dns_header_t)) {
+        LOGERR("[handle_remote_packet] received bad reply from %s, packet too small: %zd", remote_ipport, packet_len);
         return;
     }
 
-    if (packet_len < (ssize_t)sizeof(dns_header_t) + (ssize_t)sizeof(dns_query_t) + 1) {
-        LOGERR("[handle_remote_packet] received bad packet from %s, packet too small: %zd", remote_servers, packet_len);
+    uint16_t qtype = 0;
+    uint16_t ttl = 0;
+    void *answer_ptr = NULL;
+    char domain_name_buffer[DNS_DOMAIN_NAME_MAXLEN] = {0};
+    char ipaddrstring_buffer[INET6_ADDRSTRLEN] = {0};
+    bool is_chinadns = index == CHINADNS1_IDX || index == CHINADNS2_IDX;
+    int reply_check_result = dns_reply_check(g_socket_buffer, packet_len, g_verbose ? domain_name_buffer : NULL, is_chinadns, &qtype, &answer_ptr, &ttl);
+    if (reply_check_result == R_FAIL)
         return;
-    }
 
-    bool is_chnip = dns_reply_check(g_socket_buffer, packet_len, g_verbose ? g_domain_name_buffer : NULL);
-
+    queryctx_t *context = NULL;
     dns_header_t *dns_header = (dns_header_t *)g_socket_buffer;
-    hashentry_t *entry = hashmap_get(g_message_id_hashmap, dns_header->id);
-    if (!entry) {
-        IF_VERBOSE LOGINF("[handle_remote_packet] reply [%s] from %s, result: ignore", g_domain_name_buffer, remote_servers);
+    MYHASH_GET(g_query_context_hashtbl, context, &dns_header->id, sizeof(dns_header->id));
+    if (!context) {
+        IF_VERBOSE LOGINF("[handle_remote_packet] reply [%s] from %s (%hu), result: ignore, can't find context",
+                domain_name_buffer, remote_ipport, dns_header->id);
         return;
     }
 
-    /* used by `SEND_REPLY` */
     void *reply_buffer = NULL;
     size_t reply_length = 0;
 
-    bool is_chinadns = index == CHINADNS1_IDX || index == CHINADNS2_IDX;
-    if ((!g_fair_mode && !is_chinadns) || (entry->dnlmatch_ret != DNL_MRESULT_NOMATCH)) is_chnip = true;
+    if (g_fake_ip_enable && context->dnlmatch_ret != DNL_MRESULT_CHNLIST) {
+        // fake ip when ip not in china
+        if ((is_chinadns && reply_check_result == R_NOT_IN_CHN_SET) ||
+                (!is_chinadns && reply_check_result != R_NO_A_OR_AAAA && context->chinadns_got)) {
+            bool fake = false;
+            if (qtype == DNS_RECORD_TYPE_A && !is_all_zero(g_fake_ip4, sizeof(g_fake_ip4))) {
+                fake = true;
+                make_dns_reply(g_socket_buffer, &packet_len, g_fake_ip4, false, answer_ptr, ttl);
+            } else if (qtype == DNS_RECORD_TYPE_AAAA && !is_all_zero(g_fake_ip6, sizeof(g_fake_ip6))) {
+                fake = true;
+                make_dns_reply(g_socket_buffer, &packet_len, g_fake_ip6, true, answer_ptr, ttl);
+            }
+            if (fake) {
+                IF_VERBOSE {
+                    char str[INET6_ADDRSTRLEN];
+                    ip_bin_to_str(qtype == DNS_RECORD_TYPE_AAAA ? g_fake_ip6 : g_fake_ip4, qtype == DNS_RECORD_TYPE_AAAA, str);
+                    LOGINF("[handle_remote_packet] reply from [%s %hu] not in chnset, domain %s using fake ip %s, result: accept",
+                            remote_ipport, qtype, domain_name_buffer, str);
+                }
+                reply_buffer = g_socket_buffer;
+                reply_length = packet_len;
+                goto SEND_REPLY;
+            }
+        }
+    }
 
     if (is_chinadns) {
-        /* china-dns upstream */
-        if (is_chnip) {
-            /* return the china-ip, accept it */
-            IF_VERBOSE LOGINF("[handle_remote_packet] reply [%s] from %s, result: accept", g_domain_name_buffer, remote_servers);
+        if (context->dnlmatch_ret == DNL_MRESULT_CHNLIST ||
+                reply_check_result == R_IN_CHN_SET ||
+                (qtype != DNS_RECORD_TYPE_A && qtype != DNS_RECORD_TYPE_AAAA)) {
+            IF_VERBOSE LOGINF("[handle_remote_packet] reply [%s %hu] from %s (%hu), result: accept, list: %d",
+                    domain_name_buffer, qtype, remote_ipport, dns_header->id, context->dnlmatch_ret);
+            if (context->trustdns_buf) {
+                IF_VERBOSE LOGINF("[handle_remote_packet] reply [%s] from <previous-trustdns> (%hu), result: filter", domain_name_buffer, dns_header->id);
+            }
             reply_buffer = g_socket_buffer;
             reply_length = packet_len;
             goto SEND_REPLY;
         } else {
-            /* return the other-ip, filter it */
-            IF_VERBOSE LOGINF("[handle_remote_packet] reply [%s] from %s, result: filter", g_domain_name_buffer, remote_servers);
-            if (entry->trustdns_buf) {
-                /* trust-dns returns first than china-dns */
-                IF_VERBOSE LOGINF("[handle_remote_packet] reply [%s] from <previous-trustdns>, result: accept", g_domain_name_buffer);
-                reply_buffer = entry->trustdns_buf + sizeof(uint16_t);
-                reply_length = *(uint16_t *)entry->trustdns_buf;
+            IF_VERBOSE LOGINF("[handle_remote_packet] reply [%s %hu] from %s (%hu), result: filter", domain_name_buffer, qtype, remote_ipport, dns_header->id);
+            if (context->trustdns_buf) {
+                IF_VERBOSE LOGINF("[handle_remote_packet] reply [%s %hu] from <previous-trustdns> (%hu), result: accept", domain_name_buffer, qtype, dns_header->id);
+                reply_buffer = context->trustdns_buf + sizeof(uint16_t);
+                reply_length = *(uint16_t *)context->trustdns_buf;
                 goto SEND_REPLY;
             } else {
-                /* china-dns returns first than trust-dns */
-                entry->chinadns_got = true;
+                context->chinadns_got = true;
                 return;
             }
-            return;
         }
     } else {
-        /* trust-dns upstream */
-        if (is_chnip || entry->chinadns_got) {
-            /* return the china-ip, or china-dns returns first than trust-dns, accept it */
-            IF_VERBOSE LOGINF("[handle_remote_packet] reply [%s] from %s, result: accept", g_domain_name_buffer, remote_servers);
+        if (context->dnlmatch_ret == DNL_MRESULT_GFWLIST || context->chinadns_got) {
+            IF_VERBOSE LOGINF("[handle_remote_packet] reply [%s %hu] from %s (%hu), result: accept, dnlmatch_list: %d",
+                    domain_name_buffer, qtype, remote_ipport, dns_header->id, context->dnlmatch_ret);
             reply_buffer = g_socket_buffer;
             reply_length = packet_len;
             goto SEND_REPLY;
         } else {
-            if (entry->trustdns_buf) {
-                /* have received another reply from trustdns before, ignore it */
-                IF_VERBOSE LOGINF("[handle_remote_packet] reply [%s] from %s, result: ignore", g_domain_name_buffer, remote_servers);
-                return;
+            if (context->trustdns_buf) {
+                IF_VERBOSE LOGINF("[handle_remote_packet] reply [%s %hu] from %s (%hu), result: ignore", domain_name_buffer, qtype, remote_ipport, dns_header->id);
             } else {
-                /* trust-dns returns first than china-dns, delay it */
-                IF_VERBOSE LOGINF("[handle_remote_packet] reply [%s] from %s, result: delay", g_domain_name_buffer, remote_servers);
-                entry->trustdns_buf = malloc(packet_len + sizeof(uint16_t));
-                *(uint16_t *)entry->trustdns_buf = packet_len;
-                memcpy(entry->trustdns_buf + sizeof(uint16_t), g_socket_buffer, packet_len);
-                return;
+                IF_VERBOSE LOGINF("[handle_remote_packet] reply [%s %hu] from %s (%hu), result: delay", domain_name_buffer, qtype, remote_ipport, dns_header->id);
+                context->trustdns_buf = malloc(sizeof(uint16_t) + packet_len);
+                *(uint16_t *)context->trustdns_buf = packet_len; /* dns reply length */
+                memcpy(context->trustdns_buf + sizeof(uint16_t), g_socket_buffer, packet_len);
             }
             return;
         }
     }
-    return;
 
 SEND_REPLY:
     dns_header = reply_buffer;
-    dns_header->id = entry->origin_msgid; /* replace with old msgid */
-    socklen_t source_addrlen = (entry->source_addr.sin6_family == AF_INET) ? sizeof(inet4_skaddr_t) : sizeof(inet6_skaddr_t);
-    if (sendto(g_bind_socket, reply_buffer, reply_length, 0, (void *)&entry->source_addr, source_addrlen) < 0) {
-        sock_port_t source_port = 0;
-        if (entry->source_addr.sin6_family == AF_INET) {
-            parse_ipv4_addr((void *)&entry->source_addr, g_ipaddrstring_buffer, &source_port);
-        } else {
-            parse_ipv6_addr((void *)&entry->source_addr, g_ipaddrstring_buffer, &source_port);
-        }
-        LOGERR("[handle_remote_packet] failed to send dns reply packet to %s#%hu: (%d) %s", g_ipaddrstring_buffer, source_port, errno, strerror(errno));
+    dns_header->id = context->origin_msgid; /* replace with old msgid */
+    socklen_t source_addrlen = (context->source_addr.sin6_family == AF_INET) ? sizeof(skaddr4_t) : sizeof(skaddr6_t);
+    if (sendto(g_bind_sockfd, reply_buffer, reply_length, 0, (void *)&context->source_addr, source_addrlen) < 0) {
+        portno_t source_port = 0;
+        parse_socket_addr(&context->source_addr, ipaddrstring_buffer, &source_port);
+        LOGERR("[handle_remote_packet] failed to send dns reply packet to %s#%hu: (%d) %s", ipaddrstring_buffer, source_port, errno, strerror(errno));
+    } else IF_VERBOSE {
+        portno_t source_port = 0;
+        parse_socket_addr(&context->source_addr, ipaddrstring_buffer, &source_port);
+        LOGINF("[handle_remote_packet] send [%s %hu] reply to %s#%hu (%hu)", domain_name_buffer, qtype, ipaddrstring_buffer, source_port, context->unique_msgid);
     }
-    free(entry->trustdns_buf);
-    close(entry->query_timerfd);
-    hashmap_del(&g_message_id_hashmap, entry);
+    MYHASH_DEL(g_query_context_hashtbl, context);
+    close(context->query_timerfd);
+    free(context->trustdns_buf);
+    free(context);
 }
 
 /* handle upstream reply timeout event */
 static void handle_timeout_event(uint16_t msg_id) {
+    queryctx_t *context = NULL;
+    MYHASH_GET(g_query_context_hashtbl, context, &msg_id, sizeof(msg_id));
+    if (!context) return; /* due to timing issues, the query context has actually been released */
     LOGERR("[handle_timeout_event] upstream dns server reply timeout, unique msgid: %hu", msg_id);
-    hashentry_t *entry = hashmap_get(g_message_id_hashmap, msg_id);
-    free(entry->trustdns_buf); /* release the buffer that stores the trust-dns reply */
-    close(entry->query_timerfd); /* epoll will automatically remove the associated event */
-    hashmap_del(&g_message_id_hashmap, entry); /* delete and free the associated hash entry */
+    MYHASH_DEL(g_query_context_hashtbl, context); /* delete query context from the hashtable */
+    close(context->query_timerfd); /* epoll will automatically remove the associated event */
+    free(context->trustdns_buf); /* release the buffer that stores the trust-dns reply */
+    free(context);
 }
 
 int main(int argc, char *argv[]) {
@@ -478,19 +648,33 @@ int main(int argc, char *argv[]) {
     parse_command_args(argc, argv);
 
     /* show startup information */
-    LOGINF("[main] local listen addr: %s#%hu", g_bind_addr, g_bind_port);
-    if (strlen(g_remote_servers[CHINADNS1_IDX])) LOGINF("[main] chinadns server#1: %s", g_remote_servers[CHINADNS1_IDX]);
-    if (strlen(g_remote_servers[CHINADNS2_IDX])) LOGINF("[main] chinadns server#2: %s", g_remote_servers[CHINADNS2_IDX]);
-    if (strlen(g_remote_servers[TRUSTDNS1_IDX])) LOGINF("[main] trustdns server#1: %s", g_remote_servers[TRUSTDNS1_IDX]);
-    if (strlen(g_remote_servers[TRUSTDNS2_IDX])) LOGINF("[main] trustdns server#2: %s", g_remote_servers[TRUSTDNS2_IDX]);
+    LOGINF("[main] local listen addr: %s#%hu", g_bind_ipstr, g_bind_portno);
+    if (strlen(g_remote_ipports[CHINADNS1_IDX])) LOGINF("[main] chinadns server#1: %s", g_remote_ipports[CHINADNS1_IDX]);
+    if (strlen(g_remote_ipports[CHINADNS2_IDX])) LOGINF("[main] chinadns server#2: %s", g_remote_ipports[CHINADNS2_IDX]);
+    if (strlen(g_remote_ipports[TRUSTDNS1_IDX])) LOGINF("[main] trustdns server#1: %s", g_remote_ipports[TRUSTDNS1_IDX]);
+    if (strlen(g_remote_ipports[TRUSTDNS2_IDX])) LOGINF("[main] trustdns server#2: %s", g_remote_ipports[TRUSTDNS2_IDX]);
     LOGINF("[main] ipset ip4 setname: %s", g_ipset_setname4);
     LOGINF("[main] ipset ip6 setname: %s", g_ipset_setname6);
     LOGINF("[main] dns query timeout: %ld seconds", g_upstream_timeout_sec);
-    if (g_gfwlist_fname) LOGINF("[main] gfwlist entries count: %zu", dnl_init(g_gfwlist_fname, true));
-    if (g_chnlist_fname) LOGINF("[main] chnlist entries count: %zu", dnl_init(g_chnlist_fname, false));
-    if (g_repeat_times != 1) LOGINF("[main] enable repeat mode, times: %hhu", g_repeat_times);
-    if (g_noip_as_chnip) LOGINF("[main] accept reply without ip addr");
-    LOGINF("[main] core judgment mode: %s mode", g_fair_mode ? "fair" : "fast");
+    if (g_gfwlist_fname) LOGINF("[main] gfwlist entries count: %zu", dnl_init(g_gfwlist_fname, &g_gfwlist_headentry));
+    if (g_chnlist_fname) LOGINF("[main] chnlist entries count: %zu", dnl_init(g_chnlist_fname, &g_chnlist_headentry));
+    if (g_hosts_fname) LOGINF("[main] hosts entries count: %zu", hosts_init(g_hosts_fname, &g_hosts_v4_headentry, &g_hosts_v6_headentry));
+    if (g_hosts_fname && g_hosts_ttl) LOGINF("[main] hosts ttl: %d", g_hosts_ttl);
+    if (!is_all_zero(g_fake_ip4, sizeof(g_fake_ip4))) {
+        char str[INET_ADDRSTRLEN+1];
+        ip_bin_to_str(g_fake_ip4, false, str);
+        LOGINF("[main] fake dns ipv4: %s", str);
+    }
+    if (!is_all_zero(g_fake_ip6, sizeof(g_fake_ip6))) {
+        char str[INET6_ADDRSTRLEN+1];
+        ip_bin_to_str(g_fake_ip6, true, str);
+        LOGINF("[main] fake dns ipv6: %s", str);
+    }
+    if (g_gfwlist_fname && g_chnlist_fname) LOGINF("[main] %s have higher priority", g_gfwlist_first ? "gfwlist" : "chnlist");
+    if (g_repeat_times > 1) LOGINF("[main] enable repeat mode, times: %hhu", g_repeat_times);
+    LOGINF("[main] %s reply without ip addr", g_noip_as_chnip ? "accept" : "filter");
+    LOGINF("[main] cur judgment mode: %s mode", g_fair_mode ? "fair" : "fast");
+    if (g_disable_ipv4_aaaa) LOGINF("[main] disable AAAA in ipv4 env");
     if (g_reuse_port) LOGINF("[main] enable `SO_REUSEPORT` feature");
     if (g_verbose) LOGINF("[main] print the verbose running log");
 
@@ -498,20 +682,17 @@ int main(int argc, char *argv[]) {
     ipset_init_nlsocket();
 
     /* create listen socket */
-    g_bind_socket = (g_bind_skaddr.sin6_family == AF_INET) ? new_udp4_socket() : new_udp6_socket();
-    if (g_bind_skaddr.sin6_family == AF_INET6) set_ipv6_only(g_bind_socket);
-    if (g_reuse_port) set_reuse_port(g_bind_socket);
-    set_reuse_addr(g_bind_socket); // default enable
+    g_bind_sockfd = new_udp_socket(g_bind_skaddr.sin6_family);
+    if (g_reuse_port) set_reuse_port(g_bind_sockfd);
 
     /* create remote socket */
     for (int i = 0; i < SERVER_MAXCOUNT; ++i) {
-        if (!strlen(g_remote_servers[i])) continue;
-        g_remote_sockets[i] = (g_remote_skaddrs[i].sin6_family == AF_INET) ? new_udp4_socket() : new_udp6_socket();
-        if (g_remote_skaddrs[i].sin6_family == AF_INET6) set_ipv6_only(g_remote_sockets[i]);
+        if (!strlen(g_remote_ipports[i])) continue;
+        g_remote_sockfds[i] = new_udp_socket(g_remote_skaddrs[i].sin6_family);
     }
 
     /* bind address to listen socket */
-    if (bind(g_bind_socket, (void *)&g_bind_skaddr, (g_bind_skaddr.sin6_family == AF_INET) ? sizeof(inet4_skaddr_t) : sizeof(inet6_skaddr_t))) {
+    if (bind(g_bind_sockfd, (void *)&g_bind_skaddr, (g_bind_skaddr.sin6_family == AF_INET) ? sizeof(skaddr4_t) : sizeof(skaddr6_t))) {
         LOGERR("[main] failed to bind address to socket: (%d) %s", errno, strerror(errno));
         return errno;
     }
@@ -528,17 +709,17 @@ int main(int argc, char *argv[]) {
     /* listen socket readable event */
     ev.events = EPOLLIN;
     ev.data.u32 = BINDSOCK_MARK; /* don't care about msg id */
-    if (epoll_ctl(g_epollfd, EPOLL_CTL_ADD, g_bind_socket, &ev)) {
+    if (epoll_ctl(g_epollfd, EPOLL_CTL_ADD, g_bind_sockfd, &ev)) {
         LOGERR("[main] failed to register epoll event: (%d) %s", errno, strerror(errno));
         return errno;
     }
 
     /* remote socket readable event */
     for (int i = 0; i < SERVER_MAXCOUNT; ++i) {
-        if (g_remote_sockets[i] < 0) continue;
+        if (g_remote_sockfds[i] < 0) continue;
         ev.events = EPOLLIN;
         ev.data.u32 = i; /* don't care about msg id */
-        if (epoll_ctl(g_epollfd, EPOLL_CTL_ADD, g_remote_sockets[i], &ev)) {
+        if (epoll_ctl(g_epollfd, EPOLL_CTL_ADD, g_remote_sockfds[i], &ev)) {
             LOGERR("[main] failed to register epoll event: (%d) %s", errno, strerror(errno));
             return errno;
         }
@@ -557,54 +738,50 @@ int main(int argc, char *argv[]) {
             uint32_t curr_event = events[i].events;
             uint32_t curr_data = events[i].data.u32;
 
-            /* an error occurred */
             if (curr_event & EPOLLERR) {
+                /* an error occurred */
                 switch (curr_data & IDX_MARK_MASK) {
                     case CHINADNS1_IDX:
-                        LOGERR("[main] upstream server socket error(%s): (%d) %s", g_remote_servers[CHINADNS1_IDX], errno, strerror(errno));
-                        return errno ? errno : 1;
+                        LOGERR("[main] upstream server socket error(%s): (%d) %s", g_remote_ipports[CHINADNS1_IDX], errno, strerror(errno));
+                        break;
                     case CHINADNS2_IDX:
-                        LOGERR("[main] upstream server socket error(%s): (%d) %s", g_remote_servers[CHINADNS2_IDX], errno, strerror(errno));
-                        return errno ? errno : 1;
+                        LOGERR("[main] upstream server socket error(%s): (%d) %s", g_remote_ipports[CHINADNS2_IDX], errno, strerror(errno));
+                        break;
                     case TRUSTDNS1_IDX:
-                        LOGERR("[main] upstream server socket error(%s): (%d) %s", g_remote_servers[TRUSTDNS1_IDX], errno, strerror(errno));
-                        return errno ? errno : 1;
+                        LOGERR("[main] upstream server socket error(%s): (%d) %s", g_remote_ipports[TRUSTDNS1_IDX], errno, strerror(errno));
+                        break;
                     case TRUSTDNS2_IDX:
-                        LOGERR("[main] upstream server socket error(%s): (%d) %s", g_remote_servers[TRUSTDNS2_IDX], errno, strerror(errno));
-                        return errno ? errno : 1;
+                        LOGERR("[main] upstream server socket error(%s): (%d) %s", g_remote_ipports[TRUSTDNS2_IDX], errno, strerror(errno));
+                        break;
                     case BINDSOCK_MARK:
                         LOGERR("[main] local udp listen socket error: (%d) %s", errno, strerror(errno));
-                        return errno ? errno : 1;
+                        break;
                     case TIMER_FD_MARK:
                         LOGERR("[main] query timeout timer fd error: (%d) %s", errno, strerror(errno));
-                        return errno ? errno : 1;
+                        break;
                 }
-                continue;
-            }
-
-            /* ignore other events */
-            if (!(curr_event & EPOLLIN)) continue;
-
-            /* handle readable event */
-            switch (curr_data & IDX_MARK_MASK) {
-                case CHINADNS1_IDX:
-                    handle_remote_packet(CHINADNS1_IDX);
-                    break;
-                case CHINADNS2_IDX:
-                    handle_remote_packet(CHINADNS2_IDX);
-                    break;
-                case TRUSTDNS1_IDX:
-                    handle_remote_packet(TRUSTDNS1_IDX);
-                    break;
-                case TRUSTDNS2_IDX:
-                    handle_remote_packet(TRUSTDNS2_IDX);
-                    break;
-                case BINDSOCK_MARK:
-                    handle_local_packet();
-                    break;
-                case TIMER_FD_MARK:
-                    handle_timeout_event(curr_data >> BIT_SHIFT_LEN);
-                    break;
+            } else if (curr_event & EPOLLIN) {
+                /* handle readable event */
+                switch (curr_data & IDX_MARK_MASK) {
+                    case CHINADNS1_IDX:
+                        handle_remote_packet(CHINADNS1_IDX);
+                        break;
+                    case CHINADNS2_IDX:
+                        handle_remote_packet(CHINADNS2_IDX);
+                        break;
+                    case TRUSTDNS1_IDX:
+                        handle_remote_packet(TRUSTDNS1_IDX);
+                        break;
+                    case TRUSTDNS2_IDX:
+                        handle_remote_packet(TRUSTDNS2_IDX);
+                        break;
+                    case BINDSOCK_MARK:
+                        handle_local_packet();
+                        break;
+                    case TIMER_FD_MARK:
+                        handle_timeout_event(curr_data >> BIT_SHIFT_LEN);
+                        break;
+                }
             }
         }
     }

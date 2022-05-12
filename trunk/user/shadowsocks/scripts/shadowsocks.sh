@@ -90,7 +90,7 @@ local type=$stype
 }
 
 get_arg_out() {
-	router_proxy="1"
+	router_proxy="0"
 	case "$router_proxy" in
 	1) echo "-o" ;;
 	2) echo "-O" ;;
@@ -274,16 +274,9 @@ case "$run_mode" in
 		rm -f /tmp/china.ipset
 		if [ $(nvram get ss_chdns) = 1 ]; then
 			chinadnsng_enable_flag=1
-			logger -t "SS" "下载cdn域名文件..."
-			wget --no-check-certificate --timeout=8 -qO - https://gitee.com/bkye/rules/raw/master/cdn.txt > /tmp/cdn.txt
-			if [ ! -f "/tmp/cdn.txt" ]; then
-				logger -t "SS" "cdn域名文件下载失败，可能是地址失效或者网络异常！可能会影响部分国内域名解析了国外的IP！"
-			else
-				logger -t "SS" "cdn域名文件下载成功"
-			fi
 			logger -st "SS" "启动chinadns..."
 			dns2tcp -L"127.0.0.1#5353" -R"$(nvram get tunnel_forward)" >/dev/null 2>&1 &
-			chinadns-ng -b 0.0.0.0 -l 65353 -c $(nvram get china_dns) -t 127.0.0.1#5353 -4 china -M -m /tmp/cdn.txt >/dev/null 2>&1 &
+			chinadns-ng -b 0.0.0.0 -l 65353 -c $(nvram get china_dns) -t 9.9.9.9#9953,127.0.0.1#5353 -4 china -A -f -g /etc/storage/gfwlist/gfwlist_list.conf -s /etc/storage/chinadns/adhosts >/dev/null 2>&1 &
 			sed -i '/no-resolv/d' /etc/storage/dnsmasq/dnsmasq.conf
 			sed -i '/server=127.0.0.1/d' /etc/storage/dnsmasq/dnsmasq.conf
 			cat >> /etc/storage/dnsmasq/dnsmasq.conf << EOF
@@ -407,16 +400,18 @@ start_watchcat() {
 
 auto_update() {
 	sed -i '/update_chnroute/d' /etc/storage/cron/crontabs/$http_username
+	sed -i '/update_adhosts/d' /etc/storage/cron/crontabs/$http_username
 	sed -i '/update_gfwlist/d' /etc/storage/cron/crontabs/$http_username
 	sed -i '/ss-watchcat/d' /etc/storage/cron/crontabs/$http_username
 	if [ $(nvram get ss_update_chnroute) = "1" ]; then
 		cat >>/etc/storage/cron/crontabs/$http_username <<EOF
-0 8 */10 * * /usr/bin/update_chnroute.sh > /dev/null 2>&1
+0 3 */10 * * /usr/bin/update_chnroute.sh > /dev/null 2>&1
 EOF
 	fi
 	if [ $(nvram get ss_update_gfwlist) = "1" ]; then
 		cat >>/etc/storage/cron/crontabs/$http_username <<EOF
-0 7 */10 * * /usr/bin/update_gfwlist.sh > /dev/null 2>&1
+10 3 */10 * * /usr/bin/update_gfwlist.sh > /dev/null 2>&1
+30 3 */10 * * /usr/bin/update_adhosts.sh > /dev/null 2>&1
 EOF
 	fi
 }

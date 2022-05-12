@@ -66,6 +66,7 @@ fi
 
 if [ -f /etc_ro/ca-certificates.crt ]; then
 	ln -sf /etc_ro/ca-certificates.crt /etc/ssl/cert.pem
+	mkdir -p /etc/ssl/certs/ && ln -sf /etc_ro/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt #curl
 fi
 
 # create symlinks

@@ -13,8 +13,9 @@
 #include <linux/netlink.h>
 #undef _GNU_SOURCE
 
+/* since linux 3.9 */
 #ifndef SO_REUSEPORT
-#define SO_REUSEPORT 15
+  #define SO_REUSEPORT 15
 #endif
 
 /* netfilter and ipset constants definition */
@@ -67,7 +68,7 @@ struct nfgenmsg {
 
 /* static global variable declaration */
 static int    g_ipset_nlsocket                      = -1;
-static __u32  g_ipset_nlmsg_seq                     = 1;
+static __u32  g_ipset_nlmsg_seq                     = 0;
 static char   g_ipset_sendbuffer4[MSGBUFFER_MAXLEN] = {0};
 static char   g_ipset_sendbuffer6[MSGBUFFER_MAXLEN] = {0};
 static char   g_ipset_recvbuffer[MSGBUFFER_MAXLEN]  = {0};
@@ -76,39 +77,17 @@ static void  *g_ipset_ipv6addr_ptr                  = NULL;
 static __u32 *g_ipset_nlmsg4_seq_ptr                = NULL;
 static __u32 *g_ipset_nlmsg6_seq_ptr                = NULL;
 
-/* create a udp socket (AF_INET) */
-int new_udp4_socket(void) {
-    int sockfd = socket(AF_INET, SOCK_DGRAM|SOCK_CLOEXEC|SOCK_NONBLOCK, 0);
-    if (sockfd < 0) {
-        LOGERR("[new_udp4_socket] failed to create udp socket: (%d) %s", errno, strerror(errno));
-        exit(errno);
-    }
-    return sockfd;
-}
-
-/* create a udp socket (AF_INET6) */
-int new_udp6_socket(void) {
-    int sockfd = socket(AF_INET6, SOCK_DGRAM|SOCK_CLOEXEC|SOCK_NONBLOCK, 0);
-    if (sockfd < 0) {
-        LOGERR("[new_udp6_socket] failed to create udp socket: (%d) %s", errno, strerror(errno));
-        exit(errno);
-    }
-    return sockfd;
-}
-
 /* setsockopt(IPV6_V6ONLY) */
-void set_ipv6_only(int sockfd) {
-    const int optval = 1;
-    if (setsockopt(sockfd, IPPROTO_IPV6, IPV6_V6ONLY, &optval, sizeof(optval))) {
+static inline void set_ipv6_only(int sockfd) {
+    if (setsockopt(sockfd, IPPROTO_IPV6, IPV6_V6ONLY, &(int){1}, sizeof(int))) {
         LOGERR("[set_ipv6_only] setsockopt(%d, IPV6_V6ONLY): (%d) %s", sockfd, errno, strerror(errno));
         exit(errno);
     }
 }
 
 /* setsockopt(SO_REUSEADDR) */
-void set_reuse_addr(int sockfd) {
-    const int optval = 1;
-    if (setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, &optval, sizeof(optval))) {
+static inline void set_reuse_addr(int sockfd) {
+    if (setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, &(int){1}, sizeof(int))) {
         LOGERR("[set_reuse_addr] setsockopt(%d, SO_REUSEADDR): (%d) %s", sockfd, errno, strerror(errno));
         exit(errno);
     }
@@ -116,11 +95,22 @@ void set_reuse_addr(int sockfd) {
 
 /* setsockopt(SO_REUSEPORT) */
 void set_reuse_port(int sockfd) {
-    const int optval = 1;
-    if (setsockopt(sockfd, SOL_SOCKET, SO_REUSEPORT, &optval, sizeof(optval))) {
+    if (setsockopt(sockfd, SOL_SOCKET, SO_REUSEPORT, &(int){1}, sizeof(int))) {
         LOGERR("[set_reuse_port] setsockopt(%d, SO_REUSEPORT): (%d) %s", sockfd, errno, strerror(errno));
         exit(errno);
     }
+}
+
+/* create a udp socket (v4/v6) */
+int new_udp_socket(int family) {
+    int sockfd = socket(family, SOCK_DGRAM | SOCK_NONBLOCK, 0); /* since Linux 2.6.27 */
+    if (sockfd < 0) {
+        LOGERR("[new_udp_socket] failed to create udp%c socket: (%d) %s", family == AF_INET ? '4' : '6', errno, strerror(errno));
+        exit(errno);
+    }
+    if (family == AF_INET6) set_ipv6_only(sockfd);
+    set_reuse_addr(sockfd);
+    return sockfd;
 }
 
 /* create a timer fd (in seconds) */
@@ -143,12 +133,12 @@ int new_once_timerfd(time_t second) {
 }
 
 /* AF_INET or AF_INET6 or -1(invalid) */
-int get_addrstr_family(const char *addrstr) {
-    if (!addrstr) return -1;
-    inet6_ipaddr_t addrbin; /* save ipv4 and ipv6 addr */
-    if (inet_pton(AF_INET, addrstr, &addrbin) == 1) {
+int get_ipstr_family(const char *ipstr) {
+    if (!ipstr) return -1;
+    char buffer[IPV6_BINADDR_LEN]; /* v4 or v6 */
+    if (inet_pton(AF_INET, ipstr, buffer) == 1) {
         return AF_INET;
-    } else if (inet_pton(AF_INET6, addrstr, &addrbin) == 1) {
+    } else if (inet_pton(AF_INET6, ipstr, buffer) == 1) {
         return AF_INET6;
     } else {
         return -1;
@@ -156,29 +146,47 @@ int get_addrstr_family(const char *addrstr) {
 }
 
 /* build ipv4 address structure */
-void build_ipv4_addr(inet4_skaddr_t *addr, const char *host, sock_port_t port) {
-    addr->sin_family = AF_INET;
-    inet_pton(AF_INET, host, &addr->sin_addr);
-    addr->sin_port = htons(port);
+static inline void build_socket_addr4(skaddr4_t *skaddr, const char *ipstr, portno_t port) {
+    skaddr->sin_family = AF_INET;
+    inet_pton(AF_INET, ipstr, &skaddr->sin_addr);
+    skaddr->sin_port = htons(port);
 }
 
 /* build ipv6 address structure */
-void build_ipv6_addr(inet6_skaddr_t *addr, const char *host, sock_port_t port) {
-    addr->sin6_family = AF_INET6;
-    inet_pton(AF_INET6, host, &addr->sin6_addr);
-    addr->sin6_port = htons(port);
+static inline void build_socket_addr6(skaddr6_t *skaddr, const char *ipstr, portno_t port) {
+    skaddr->sin6_family = AF_INET6;
+    inet_pton(AF_INET6, ipstr, &skaddr->sin6_addr);
+    skaddr->sin6_port = htons(port);
+}
+
+/* build v4/v6 address structure */
+void build_socket_addr(int family, void *skaddr, const char *ipstr, portno_t portno) {
+    if (family == AF_INET) {
+        build_socket_addr4(skaddr, ipstr, portno);
+    } else {
+        build_socket_addr6(skaddr, ipstr, portno);
+    }
 }
 
 /* parse ipv4 address structure */
-void parse_ipv4_addr(const inet4_skaddr_t *addr, char *host, sock_port_t *port) {
-    inet_ntop(AF_INET, &addr->sin_addr, host, INET_ADDRSTRLEN);
-    *port = ntohs(addr->sin_port);
+static inline void parse_socket_addr4(const skaddr4_t *skaddr, char *ipstr, portno_t *port) {
+    inet_ntop(AF_INET, &skaddr->sin_addr, ipstr, INET_ADDRSTRLEN);
+    *port = ntohs(skaddr->sin_port);
 }
 
 /* parse ipv6 address structure */
-void parse_ipv6_addr(const inet6_skaddr_t *addr, char *host, sock_port_t *port) {
-    inet_ntop(AF_INET6, &addr->sin6_addr, host, INET6_ADDRSTRLEN);
-    *port = ntohs(addr->sin6_port);
+static inline void parse_socket_addr6(const skaddr6_t *skaddr, char *ipstr, portno_t *port) {
+    inet_ntop(AF_INET6, &skaddr->sin6_addr, ipstr, INET6_ADDRSTRLEN);
+    *port = ntohs(skaddr->sin6_port);
+}
+
+/* parse v4/v6 address structure */
+void parse_socket_addr(const void *skaddr, char *ipstr, portno_t *portno) {
+    if (((const skaddr4_t *)skaddr)->sin_family == AF_INET) {
+        parse_socket_addr4(skaddr, ipstr, portno);
+    } else {
+        parse_socket_addr6(skaddr, ipstr, portno);
+    }
 }
 
 /* create ipset netlink socket */
@@ -257,7 +265,7 @@ static void ipset_prebuild_nlmsg(bool is_ipv4) {
 
     /* ipset_ip attr */
     struct nlattr *ipset_ip_attr = buffer + netlink_msg->nlmsg_len;
-    ipset_ip_attr->nla_len = NLMSG_ALIGN(sizeof(struct nlattr)) + (is_ipv4 ? sizeof(inet4_ipaddr_t) : sizeof(inet6_ipaddr_t));
+    ipset_ip_attr->nla_len = NLMSG_ALIGN(sizeof(struct nlattr)) + (is_ipv4 ? IPV4_BINADDR_LEN : IPV6_BINADDR_LEN);
     ipset_ip_attr->nla_type = (is_ipv4 ? IPSET_ATTR_IPADDR_IPV4 : IPSET_ATTR_IPADDR_IPV6) | NLA_F_NET_BYTEORDER;
     if (is_ipv4) g_ipset_ipv4addr_ptr = (void *)&ipset_ip_attr->nla_type + sizeof(ipset_ip_attr->nla_type); // ptr for set ipv4 addr
     if (!is_ipv4) g_ipset_ipv6addr_ptr = (void *)&ipset_ip_attr->nla_type + sizeof(ipset_ip_attr->nla_type); // ptr for set ipv6 addr
@@ -276,82 +284,94 @@ void ipset_init_nlsocket(void) {
 /* get a string description of the ipset error code */
 static inline const char* ipset_error_tostr(int errcode) {
     switch (errcode) {
-        case IPSET_ERR_PROTOCOL: return "IPSET_ERR_PROTOCOL";
-        case IPSET_ERR_FIND_TYPE: return "IPSET_ERR_FIND_TYPE";
-        case IPSET_ERR_MAX_SETS: return "IPSET_ERR_MAX_SETS";
-        case IPSET_ERR_BUSY: return "IPSET_ERR_BUSY";
-        case IPSET_ERR_EXIST_SETNAME2: return "IPSET_ERR_EXIST_SETNAME2";
-        case IPSET_ERR_TYPE_MISMATCH: return "IPSET_ERR_TYPE_MISMATCH";
-        case IPSET_ERR_EXIST: return "IPSET_ERR_EXIST";
-        case IPSET_ERR_INVALID_CIDR: return "IPSET_ERR_INVALID_CIDR";
-        case IPSET_ERR_INVALID_NETMASK: return "IPSET_ERR_INVALID_NETMASK";
-        case IPSET_ERR_INVALID_FAMILY: return "IPSET_ERR_INVALID_FAMILY";
-        case IPSET_ERR_INVALID_MARKMASK: return "IPSET_ERR_INVALID_MARKMASK";
-        case IPSET_ERR_TIMEOUT: return "IPSET_ERR_TIMEOUT";
-        case IPSET_ERR_REFERENCED: return "IPSET_ERR_REFERENCED";
-        case IPSET_ERR_IPADDR_IPV4: return "IPSET_ERR_IPADDR_IPV4";
-        case IPSET_ERR_IPADDR_IPV6: return "IPSET_ERR_IPADDR_IPV6";
-        case IPSET_ERR_COUNTER: return "IPSET_ERR_COUNTER";
-        case IPSET_ERR_COMMENT: return "IPSET_ERR_COMMENT";
-        case IPSET_ERR_SKBINFO: return "IPSET_ERR_SKBINFO";
-        case IPSET_ERR_HASH_FULL: return "IPSET_ERR_HASH_FULL";
-        case IPSET_ERR_HASH_ELEM: return "IPSET_ERR_HASH_ELEM";
-        case IPSET_ERR_INVALID_PROTO: return "IPSET_ERR_INVALID_PROTO";
-        case IPSET_ERR_MISSING_PROTO: return "IPSET_ERR_MISSING_PROTO";
+        case IPSET_ERR_PROTOCOL:               return "IPSET_ERR_PROTOCOL";
+        case IPSET_ERR_FIND_TYPE:              return "IPSET_ERR_FIND_TYPE";
+        case IPSET_ERR_MAX_SETS:               return "IPSET_ERR_MAX_SETS";
+        case IPSET_ERR_BUSY:                   return "IPSET_ERR_BUSY";
+        case IPSET_ERR_EXIST_SETNAME2:         return "IPSET_ERR_EXIST_SETNAME2";
+        case IPSET_ERR_TYPE_MISMATCH:          return "IPSET_ERR_TYPE_MISMATCH";
+        case IPSET_ERR_EXIST:                  return "IPSET_ERR_EXIST";
+        case IPSET_ERR_INVALID_CIDR:           return "IPSET_ERR_INVALID_CIDR";
+        case IPSET_ERR_INVALID_NETMASK:        return "IPSET_ERR_INVALID_NETMASK";
+        case IPSET_ERR_INVALID_FAMILY:         return "IPSET_ERR_INVALID_FAMILY";
+        case IPSET_ERR_INVALID_MARKMASK:       return "IPSET_ERR_INVALID_MARKMASK";
+        case IPSET_ERR_TIMEOUT:                return "IPSET_ERR_TIMEOUT";
+        case IPSET_ERR_REFERENCED:             return "IPSET_ERR_REFERENCED";
+        case IPSET_ERR_IPADDR_IPV4:            return "IPSET_ERR_IPADDR_IPV4";
+        case IPSET_ERR_IPADDR_IPV6:            return "IPSET_ERR_IPADDR_IPV6";
+        case IPSET_ERR_COUNTER:                return "IPSET_ERR_COUNTER";
+        case IPSET_ERR_COMMENT:                return "IPSET_ERR_COMMENT";
+        case IPSET_ERR_SKBINFO:                return "IPSET_ERR_SKBINFO";
+        case IPSET_ERR_HASH_FULL:              return "IPSET_ERR_HASH_FULL";
+        case IPSET_ERR_HASH_ELEM:              return "IPSET_ERR_HASH_ELEM";
+        case IPSET_ERR_INVALID_PROTO:          return "IPSET_ERR_INVALID_PROTO";
+        case IPSET_ERR_MISSING_PROTO:          return "IPSET_ERR_MISSING_PROTO";
         case IPSET_ERR_HASH_RANGE_UNSUPPORTED: return "IPSET_ERR_HASH_RANGE_UNSUPPORTED";
-        case IPSET_ERR_HASH_RANGE: return "IPSET_ERR_HASH_RANGE";
-        default: return strerror(-errcode);
+        case IPSET_ERR_HASH_RANGE:             return "IPSET_ERR_HASH_RANGE";
+        default:                               return strerror(-errcode);
     }
 }
 
 /* check given ipaddr is exists in ipset */
-bool ipset_addr4_is_exists(const inet4_ipaddr_t *addr_ptr) {
-    memcpy(g_ipset_ipv4addr_ptr, addr_ptr, sizeof(inet4_ipaddr_t));
-    *g_ipset_nlmsg4_seq_ptr = g_ipset_nlmsg_seq++;
-    const struct nlmsghdr *netlink_msg = (struct nlmsghdr *)g_ipset_sendbuffer4;
-    if (send(g_ipset_nlsocket, g_ipset_sendbuffer4, netlink_msg->nlmsg_len, 0) < 0) {
-        LOGERR("[ipset_addr4_is_exists] failed to send netlink msg to kernel: (%d) %s", errno, strerror(errno));
+bool ipset_addr_is_exists(const void *addr_ptr, bool is_ipv4) {
+    void *ipaddr_buf = is_ipv4 ? g_ipset_ipv4addr_ptr : g_ipset_ipv6addr_ptr;
+    __u32 *msgseq_ptr = is_ipv4 ? g_ipset_nlmsg4_seq_ptr : g_ipset_nlmsg6_seq_ptr;
+    struct nlmsghdr *netlink_sendmsg = (void *)(is_ipv4 ? g_ipset_sendbuffer4 : g_ipset_sendbuffer6);
+
+    *msgseq_ptr = g_ipset_nlmsg_seq++; /* increment nlmsg seq */
+    memcpy(ipaddr_buf, addr_ptr, is_ipv4 ? IPV4_BINADDR_LEN : IPV6_BINADDR_LEN); /* replace ipv4/ipv6 addr */
+
+    if (send(g_ipset_nlsocket, netlink_sendmsg, netlink_sendmsg->nlmsg_len, 0) < 0) {
+        LOGERR("[ipset_addr%c_is_exists] failed to send netlink msg to kernel: (%d) %s", is_ipv4 ? '4' : '6', errno, strerror(errno));
         return false;
     }
     if (recv(g_ipset_nlsocket, g_ipset_recvbuffer, MSGBUFFER_MAXLEN, 0) < 0) {
-        LOGERR("[ipset_addr4_is_exists] failed to recv netlink msg from kernel: (%d) %s", errno, strerror(errno));
+        LOGERR("[ipset_addr%c_is_exists] failed to recv netlink msg from kernel: (%d) %s", is_ipv4 ? '4' : '6', errno, strerror(errno));
         return false;
     }
-    const struct nlmsgerr *netlink_errmsg = NLMSG_DATA(g_ipset_recvbuffer);
-    switch (netlink_errmsg->error) {
-        case 0:
-            return true; // exist
-        case IPSET_ERR_EXIST:
-            return false; // not exist
-        default:
-            LOGERR("[ipset_addr4_is_exists] received an error code from kernel: (%d) %s", netlink_errmsg->error, ipset_error_tostr(netlink_errmsg->error));
-            return false; // error occurred
+
+    int errcode = ((struct nlmsgerr *)NLMSG_DATA(g_ipset_recvbuffer))->error;
+    if (errcode == 0) {
+        return true; // exists
+    } else if (errcode == IPSET_ERR_EXIST) {
+        return false; // not exists
+    } else {
+        LOGERR("[ipset_addr%c_is_exists] received an error code from kernel: (%d) %s", is_ipv4 ? '4' : '6', errcode, ipset_error_tostr(errcode));
+        return false; // error occurred
     }
-    return false; // unachievable
 }
 
-/* check given ipaddr is exists in ipset */
-bool ipset_addr6_is_exists(const inet6_ipaddr_t *addr_ptr) {
-    memcpy(g_ipset_ipv6addr_ptr, addr_ptr, sizeof(inet6_ipaddr_t));
-    *g_ipset_nlmsg6_seq_ptr = g_ipset_nlmsg_seq++;
-    const struct nlmsghdr *netlink_msg = (struct nlmsghdr *)g_ipset_sendbuffer6;
-    if (send(g_ipset_nlsocket, g_ipset_sendbuffer6, netlink_msg->nlmsg_len, 0) < 0) {
-        LOGERR("[ipset_addr6_is_exists] failed to send netlink msg to kernel: (%d) %s", errno, strerror(errno));
+bool ip_str_to_bin(const char *buf, uint8_t *out, bool *is_v6) {
+    if (inet_pton(AF_INET, buf, out) > 0) {
+        *is_v6 = false;
+    } else if (inet_pton(AF_INET6, buf, out) > 0) {
+        *is_v6 = true;
+    } else {
+        LOGERR("[ip_str_to_bin] convert %s to binary failed", buf);
         return false;
     }
-    if (recv(g_ipset_nlsocket, g_ipset_recvbuffer, MSGBUFFER_MAXLEN, 0) < 0) {
-        LOGERR("[ipset_addr6_is_exists] failed to recv netlink msg from kernel: (%d) %s", errno, strerror(errno));
-        return false;
+    return true;
+}
+
+bool ip_bin_to_str(uint8_t *buf, bool is_v6, char *out) {
+    if (is_v6) {
+        if (inet_ntop(AF_INET6, buf, out, INET6_ADDRSTRLEN) == NULL) {
+            LOGERR("[ip_bin_to_str] convert to ipv6 string failed. (%d) %s", errno, strerror(errno));
+            return false;
+        }
+    } else {
+        if (inet_ntop(AF_INET, buf, out, INET6_ADDRSTRLEN) == NULL) {
+            LOGERR("[ip_bin_to_str] convert to ipv4 string failed. (%d) %s", errno, strerror(errno));
+            return false;
+        }
     }
-    const struct nlmsgerr *netlink_errmsg = NLMSG_DATA(g_ipset_recvbuffer);
-    switch (netlink_errmsg->error) {
-        case 0:
-            return true; // exist
-        case IPSET_ERR_EXIST:
-            return false; // not exist
-        default:
-            LOGERR("[ipset_addr6_is_exists] received an error code from kernel: (%d) %s", netlink_errmsg->error, ipset_error_tostr(netlink_errmsg->error));
-            return false; // error occurred
+    return true;
+}
+
+bool is_all_zero(uint8_t *buf, size_t len) {
+    unsigned int i;
+    for (i = 0;i < len;i++) {
+        if (buf[i] != 0) return false;
     }
-    return false; // unachievable
+    return true;
 }

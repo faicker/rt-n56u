@@ -14,6 +14,12 @@ if [ -z "$CHNROUTE_URL" ]; then
 else
 	curl -k -s --connect-timeout 20 --retry 3 -o /tmp/chinadns_chnroute.txt "$CHNROUTE_URL"
 fi
+num=`wc -l /tmp/chinadns_chnroute.txt | awk '{print $1}'`
+if [ $num -lt 100 ]; then
+	logger -st "chnroute" "Update failed"
+	rm -f /tmp/chinadns_chnroute.txt
+	return
+fi
 
 [ ! -d /etc/storage/chinadns/ ] && mkdir /etc/storage/chinadns/
 mv -f /tmp/chinadns_chnroute.txt /etc/storage/chinadns/chnroute.txt

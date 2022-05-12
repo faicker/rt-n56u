@@ -91,13 +91,18 @@ flush_r() {
 	return 0
 }
 
-ipset_r() {
-    mkdir -p /tmp/dnsmasq.dom
+ipset_i() {
 	if [ "$RUNMODE" = "router" ] ;then
 	ipset -! -R <<-EOF || return 1
 		create ss_spec_wan_ac hash:net
 		$(gen_iplist | sed -e "s/^/add ss_spec_wan_ac /")
 EOF
+	fi
+}
+
+ipset_r() {
+    mkdir -p /tmp/dnsmasq.dom
+	if [ "$RUNMODE" = "router" ] ;then
 	ipset -N china hash:net 2>/dev/null
 	$ipt_n -N SS_SPEC_WAN_AC
 	$ipt_n -A SS_SPEC_WAN_AC -m set --match-set ss_spec_wan_ac dst -j RETURN
@@ -156,14 +161,7 @@ EOF
 
 fw_rule() {
 	$ipt_n -N SS_SPEC_WAN_FW
-	$ipt_n -A SS_SPEC_WAN_FW -d 0.0.0.0/8 -j RETURN
-	$ipt_n -A SS_SPEC_WAN_FW -d 10.0.0.0/8 -j RETURN
-	$ipt_n -A SS_SPEC_WAN_FW -d 127.0.0.0/8 -j RETURN
-	$ipt_n -A SS_SPEC_WAN_FW -d 169.254.0.0/16 -j RETURN
-	$ipt_n -A SS_SPEC_WAN_FW -d 172.16.0.0/12 -j RETURN
-	$ipt_n -A SS_SPEC_WAN_FW -d 192.168.0.0/16 -j RETURN
-	$ipt_n -A SS_SPEC_WAN_FW -d 224.0.0.0/4 -j RETURN
-	$ipt_n -A SS_SPEC_WAN_FW -d 240.0.0.0/4 -j RETURN
+	$ipt_n -A SS_SPEC_WAN_FW -m set --match-set ss_spec_wan_ac dst -j RETURN
   	echo $LANCON
 	if [ "$LANCON" = "all" ];then
 	ipset -N fplan hash:net 2>/dev/null
@@ -204,17 +202,7 @@ tp_rule() {
 	ip route add local 0.0.0.0/0 dev lo table 100
 
 	$ipt_m -N SS_SPEC_TPROXY
-	$ipt_m -A SS_SPEC_TPROXY -p udp --dport 443 -j RETURN
-	$ipt_m -A SS_SPEC_TPROXY -p udp --dport 53 -j RETURN
-	$ipt_m -A SS_SPEC_TPROXY -p udp -d 0.0.0.0/8 -j RETURN
-	$ipt_m -A SS_SPEC_TPROXY -p udp -d 10.0.0.0/8 -j RETURN
-	$ipt_m -A SS_SPEC_TPROXY -p udp -d 127.0.0.0/8 -j RETURN
-	$ipt_m -A SS_SPEC_TPROXY -p udp -d 169.254.0.0/16 -j RETURN
-	$ipt_m -A SS_SPEC_TPROXY -p udp -d 172.16.0.0/12 -j RETURN
-	$ipt_m -A SS_SPEC_TPROXY -p udp -d 192.168.0.0/16 -j RETURN
-	$ipt_m -A SS_SPEC_TPROXY -p udp -d 224.0.0.0/4 -j RETURN
-	$ipt_m -A SS_SPEC_TPROXY -p udp -d 240.0.0.0/4 -j RETURN
-	$ipt_m -A SS_SPEC_TPROXY -p udp -d $SERVER -j RETURN
+	$ipt_m -A SS_SPEC_TPROXY -p udp -m set --match-set ss_spec_wan_ac dst -j RETURN
 	if [ "$TPROXY" -ne 1 ]; then
 	$ipt_n -I SS_SPEC_WAN_AC 1 -d $server -j RETURN
 	fi
@@ -223,16 +211,13 @@ tp_rule() {
 		#-j TPROXY --on-port "$LOCAL_PORT" --tproxy-mark 100
 
 	if [ "$RUNMODE" = "router" ] ;then
-	$ipt_m -A SS_SPEC_TPROXY -p udp $PROXY_PORTS -m set ! --match-set ss_spec_wan_ac dst \
-		-j TPROXY --on-port "$LOCAL_PORT" --tproxy-mark 0x01/0x01
 	$ipt_m -A SS_SPEC_TPROXY -p udp $PROXY_PORTS -m set ! --match-set china dst \
 		-j TPROXY --on-port "$LOCAL_PORT" --tproxy-mark 0x01/0x01
-	$ipt_m -I SS_SPEC_TPROXY -p udp --dport 5353 -j RETURN
 	$ipt_m -A PREROUTING -p udp -j SS_SPEC_TPROXY
 
 	elif [ "$RUNMODE" = "gfw" ] ;then
 	$ipt_m -A SS_SPEC_TPROXY -p udp -m set  $PROXY_PORTS --match-set gfwlist dst -j TPROXY --on-port "$LOCAL_PORT" --tproxy-mark 0x01/0x01
-	$ipt_m -I SS_SPEC_TPROXY -p udp --dport 5353 -j RETURN
+	#$ipt_m -I SS_SPEC_TPROXY -p udp --dport 5353 -j RETURN
 	$ipt_m -A PREROUTING -p udp -j SS_SPEC_TPROXY
 
 	elif [ "$RUNMODE" = "oversea" ] ;then
@@ -410,6 +395,6 @@ elif [ "$TPROXY" = 2 ]; then
 	: ${LOCAL_PORT:?"You must assign a port for the udp relay server."}
 fi
 
-flush_r && fw_rule && ipset_r && ac_rule && tp_rule && gen_include
+flush_r && ipset_i && fw_rule && ipset_r && ac_rule && tp_rule && gen_include
 [ "$?" = 0 ] || loger 3 "Start failed!"
 exit $?

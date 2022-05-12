@@ -12,7 +12,7 @@ endif
 
 all:
 ifeq ($(IPROUTE2_ENABLED),y)
-	$(MAKE) -C $(SRC_NAME)
+	$(MAKE) -C $(SRC_NAME) CONFIG_IPV6=y CONFIG_XFRM=y
 else
 	exit 0
 endif

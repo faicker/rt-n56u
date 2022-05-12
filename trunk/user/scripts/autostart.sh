@@ -72,3 +72,13 @@ if [ $(nvram get zerotier_enable) = 1 ] ; then
 logger -t "自动启动" "正在启动zerotier"
 /usr/bin/zerotier.sh start
 fi
+
+#rps
+logger -t "optimize" "rps"
+cpu_number=`grep -c '^processor' /proc/cpuinfo`
+v=$(( (1<<$cpu_number)-1 ))
+v=`printf "%x" $v`
+for nic in `/bin/ls -1 /sys/devices/virtual/net`;do
+	echo $v > /sys/class/net/$nic/queues/rx-0/rps_cpus
+	echo 4096 > /sys/class/net/$nic/queues/rx-0/rps_flow_cnt
+done

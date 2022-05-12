@@ -1,11 +1,10 @@
-url = http://ftp.apnic.net/apnic/stats/apnic/delegated-apnic-latest
+url = https://cdn.jsdelivr.net/gh/misakaio/chnroutes2@master/chnroutes.txt
 THISDIR = $(shell pwd)
 
 all :
 	( if [ ! -f chnroute.bz2 ];then \
-		wget -t13 -4 --timeout=15 -O chnroute.txt.tmp '$(url)' && \
-		awk -F\| '/CN\|ipv4/ { printf("%s/%d\n", $$4, 32-log($$5)/log(2)) }' < chnroute.txt.tmp > chnroute.txt && \
-		rm -f chnroute.txt.tmp && tar jcf chnroute.bz2 chnroute.txt ;\
+		wget -t13 -4 --timeout=15 -O chnroute.txt '$(url)' && \
+		tar jcf chnroute.bz2 chnroute.txt ;\
 	fi )
 
 romfs:

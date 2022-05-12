@@ -7,55 +7,9 @@
 #include <netinet/in.h>
 #undef _GNU_SOURCE
 
-#define DNS_QR_QUERY 0
-#define DNS_QR_REPLY 1
-#define DNS_OPCODE_QUERY 0
-#define DNS_RCODE_NOERROR 0
-#define DNS_CLASS_INTERNET 1
-#define DNS_RECORD_TYPE_A 1 /* ipv4 address */
-#define DNS_RECORD_TYPE_AAAA 28 /* ipv6 address */
-#define DNS_DNAME_LABEL_MAXLEN 63 /* domain-name label maxlen */
-#define DNS_DNAME_COMPRESSION_MINVAL 192 /* domain-name compression minval */
-
-/* check query packet header */
-static inline bool dns_qheader_check(const void *packet_buf) {
-    const dns_header_t *header = packet_buf;
-    if (header->qr != DNS_QR_QUERY) {
-        LOGERR("[dns_qheader_check] this is a query packet, but header->qr != 0");
-        return false;
-    }
-    if (header->opcode != DNS_OPCODE_QUERY) {
-        LOGERR("[dns_qheader_check] this is not a standard query, opcode: %hhu", header->opcode);
-        return false;
-    }
-    if (ntohs(header->question_count) != 1) {
-        LOGERR("[dns_qheader_check] there should be one and only one question section");
-        return false;
-    }
-    return true;
-}
-
-/* check reply packet header */
-static inline bool dns_rheader_check(const void *packet_buf) {
-    const dns_header_t *header = packet_buf;
-    if (header->qr != DNS_QR_REPLY) {
-        LOGERR("[dns_rheader_check] this is a reply packet, but header->qr != 1");
-        return false;
-    }
-    if (header->opcode != DNS_OPCODE_QUERY) {
-        LOGERR("[dns_rheader_check] this is not a standard query, opcode: %hhu", header->opcode);
-        return false;
-    }
-    if (ntohs(header->question_count) != 1) {
-        LOGERR("[dns_rheader_check] there should be one and only one question section");
-        return false;
-    }
-    return true;
-}
-
 /* check dns packet */
-static bool dns_packet_check(const void *packet_buf, ssize_t packet_len, char *name_buf, bool is_query, const void **answer_ptr) {
-    /* check packet length */ 
+static bool dns_packet_check(void *packet_buf, ssize_t packet_len, char *name_buf, bool is_query, void **answer_ptr, uint16_t *qtype) {
+    /* check packet length */
     if (packet_len < (ssize_t)sizeof(dns_header_t) + (ssize_t)sizeof(dns_query_t) + 1) {
         LOGERR("[dns_packet_check] the dns packet is too small: %zd", packet_len);
         return false;
@@ -66,8 +20,19 @@ static bool dns_packet_check(const void *packet_buf, ssize_t packet_len, char *n
     }
 
     /* check packet header */
-    if (is_query) if (!dns_qheader_check(packet_buf)) return false;
-    if (!is_query) if (!dns_rheader_check(packet_buf)) return false;
+    const dns_header_t *header = packet_buf;
+    if (header->qr != (is_query ? DNS_QR_QUERY : DNS_QR_REPLY)) {
+        LOGERR("[dns_packet_check] this is a %s packet, but header->qr != %d", is_query ? "query" : "reply", is_query ? DNS_QR_QUERY : DNS_QR_REPLY);
+        return false;
+    }
+    if (header->opcode != DNS_OPCODE_QUERY) {
+        LOGERR("[dns_packet_check] this is not a standard query, opcode: %hhu", header->opcode);
+        return false;
+    }
+    if (ntohs(header->question_count) != 1) {
+        LOGERR("[dns_packet_check] there should be one and only one question section");
+        return false;
+    }
 
     /* move ptr to question section */
     packet_buf += sizeof(dns_header_t);
@@ -123,6 +88,7 @@ static bool dns_packet_check(const void *packet_buf, ssize_t packet_len, char *n
         LOGERR("[dns_packet_check] only supports standard internet query class");
         return false;
     }
+    if (qtype) *qtype = ntohs(query_ptr->qtype);
 
     /* save answer section ptr (used for reply) */
     if (answer_ptr) *answer_ptr = packet_buf + sizeof(dns_query_t);
@@ -131,7 +97,8 @@ static bool dns_packet_check(const void *packet_buf, ssize_t packet_len, char *n
 }
 
 /* check the ipaddr of the first A/AAAA record is in `chnroute` ipset */
-static bool dns_ipset_check(const void *packet_ptr, const void *ans_ptr, ssize_t ans_len) {
+/* 0 = in ipset */
+static int dns_ipset_check(bool chk_ipset, const void *packet_ptr, const void *ans_ptr, ssize_t ans_len, uint16_t *ttl) {
     const dns_header_t *header = packet_ptr;
 
     /* count number of answers */
@@ -140,7 +107,7 @@ static bool dns_ipset_check(const void *packet_ptr, const void *ans_ptr, ssize_t
     /* check dns packet length */
     if (ans_len < answer_count * ((ssize_t)sizeof(dns_record_t) + 1)) {
         LOGERR("[dns_ipset_check] the format of the dns packet is incorrect");
-        return false;
+        return R_FAIL;
     }
 
     /* only filter A/AAAA reply */
@@ -156,20 +123,20 @@ static bool dns_ipset_check(const void *packet_ptr, const void *ans_ptr, ssize_t
                 ans_len -= 2;
                 if (ans_len < (ssize_t)sizeof(dns_record_t)) {
                     LOGERR("[dns_ipset_check] the format of the dns packet is incorrect");
-                    return false;
+                    return R_FAIL;
                 }
                 break;
             }
             if (label_len > DNS_DNAME_LABEL_MAXLEN) {
                 LOGERR("[dns_ipset_check] the length of the domain name label is too long");
-                return false;
+                return R_FAIL;
             }
             if (label_len == 0) {
                 ++ans_ptr;
                 --ans_len;
                 if (ans_len < (ssize_t)sizeof(dns_record_t)) {
                     LOGERR("[dns_ipset_check] the format of the dns packet is incorrect");
-                    return false;
+                    return R_FAIL;
                 }
                 break;
             }
@@ -177,52 +144,93 @@ static bool dns_ipset_check(const void *packet_ptr, const void *ans_ptr, ssize_t
             ans_len -= label_len + 1;
             if (ans_len < (ssize_t)sizeof(dns_record_t) + 1) {
                 LOGERR("[dns_ipset_check] the format of the dns packet is incorrect");
-                return false;
+                return R_FAIL;
             }
         }
         const dns_record_t *record = ans_ptr;
         if (ntohs(record->rclass) != DNS_CLASS_INTERNET) {
             LOGERR("[dns_ipset_check] only supports standard internet query class");
-            return false;
+            return R_FAIL;
         }
         uint16_t rdatalen = ntohs(record->rdatalen);
         if (ans_len < (ssize_t)sizeof(dns_record_t) + rdatalen) {
             LOGERR("[dns_ipset_check] the format of the dns packet is incorrect");
-            return false;
+            return R_FAIL;
         }
+        *ttl = ntohl(record->rttl);
+        if (!chk_ipset) return R_NOT_IN_CHN_SET;
         switch (ntohs(record->rtype)) {
             case DNS_RECORD_TYPE_A:
-                if (rdatalen != sizeof(inet4_ipaddr_t)) {
+                if (rdatalen != IPV4_BINADDR_LEN) {
                     LOGERR("[dns_ipset_check] the format of the dns packet is incorrect");
-                    return false;
+                    return R_FAIL;
                 }
-                return ipset_addr4_is_exists((void *)record->rdataptr);
+                if (chk_ipset)
+                    return ipset_addr_is_exists(record->rdataptr, true) ? R_IN_CHN_SET : R_NOT_IN_CHN_SET;/* in chnroute? */
+                break;
             case DNS_RECORD_TYPE_AAAA:
-                if (rdatalen != sizeof(inet6_ipaddr_t)) {
+                if (rdatalen != IPV6_BINADDR_LEN) {
                     LOGERR("[dns_ipset_check] the format of the dns packet is incorrect");
-                    return false;
+                    return R_FAIL;
                 }
-                return ipset_addr6_is_exists((void *)record->rdataptr);
+                if (chk_ipset)
+                    return ipset_addr_is_exists(record->rdataptr, false) ? R_IN_CHN_SET : R_NOT_IN_CHN_SET; /* in chnroute6? */
+                break;
             default:
                 ans_ptr += sizeof(dns_record_t) + rdatalen;
                 ans_len -= sizeof(dns_record_t) + rdatalen;
                 if (i != answer_count - 1 && ans_len < (ssize_t)sizeof(dns_record_t) + 1) {
                     LOGERR("[dns_ipset_check] the format of the dns packet is incorrect");
-                    return false;
+                    return R_FAIL;
                 }
         }
     }
-    return g_noip_as_chnip; /* not found A/AAAA record */
+    return R_NO_A_OR_AAAA;
 }
 
-/* check a dns query packet, `name_buf` used to get domain name */
-bool dns_query_check(const void *packet_buf, ssize_t packet_len, char *name_buf) {
-    return dns_packet_check(packet_buf, packet_len, name_buf, true, NULL);
+/* check dns query, `name_buf` used to get domain name, return true if valid */
+bool dns_query_check(void *packet_buf, ssize_t packet_len, char *name_buf, uint16_t *qtype, void **answer_ptr) {
+    return dns_packet_check(packet_buf, packet_len, name_buf, true, answer_ptr, qtype);
 }
 
-/* check a dns reply packet, `name_buf` used to get domain name */
-bool dns_reply_check(const void *packet_buf, ssize_t packet_len, char *name_buf) {
-    const void *answer_ptr = NULL;
-    if (!dns_packet_check(packet_buf, packet_len, name_buf, false, &answer_ptr)) return false;
-    return dns_ipset_check(packet_buf, answer_ptr, packet_len - (answer_ptr - packet_buf));
+/* check dns reply, `name_buf` used to get domain name, return true if accept(china dns return china ip) */
+int dns_reply_check(void *packet_buf, ssize_t packet_len, char *name_buf, bool chk_ipset, uint16_t *qtype, void **answer_ptr, uint16_t *ttl) {
+    if (!dns_packet_check(packet_buf, packet_len, name_buf, false, answer_ptr, qtype)) return R_FAIL;
+    return dns_ipset_check(chk_ipset, packet_buf, *answer_ptr, packet_len - (*answer_ptr - packet_buf), ttl);
+}
+
+void make_dns_reply_empty_domain(void *packet_buf, ssize_t *packet_len, void *answer_ptr) {
+    dns_header_t *rheader = (dns_header_t *)packet_buf;
+    rheader->qr = 1;
+    rheader->ra = 1;
+    rheader->z = 0;
+    rheader->answer_count = 0;
+    rheader->additional_count = 0;
+    *packet_len = (uint8_t *)answer_ptr - (uint8_t *)packet_buf;
+}
+
+void make_dns_reply(void *packet_buf, ssize_t *packet_len, uint8_t *ip, bool is_v6, void *answer_ptr, uint16_t ttl) {
+    dns_header_t *rheader = (dns_header_t *)packet_buf;
+    rheader->qr = 1;
+    rheader->ra = 1;
+    rheader->z = 0;
+    rheader->answer_count = htons(1);
+    rheader->additional_count = 0;
+    uint8_t *p = answer_ptr;
+    *p++ = 0xc0;
+    *p++ = sizeof(dns_header_t);
+    dns_record_t *record = (dns_record_t *)p;
+    size_t iplen = 0;
+    if (is_v6) {
+        record->rtype = htons(DNS_RECORD_TYPE_AAAA);
+        iplen = IPV6_BINADDR_LEN;
+    } else {
+        record->rtype = htons(DNS_RECORD_TYPE_A);
+        iplen = IPV4_BINADDR_LEN;
+    }
+    record->rdatalen = htons(iplen);
+    memcpy(record->rdataptr, ip, iplen);
+    record->rclass = htons(DNS_CLASS_INTERNET);
+    record->rttl = htonl(ttl);
+    *packet_len = (uint8_t *)answer_ptr - (uint8_t *)packet_buf + 2 + sizeof(dns_record_t) + iplen;
 }

@@ -79,27 +79,27 @@ chmod 755 "/etc/storage/uss_dom.sh"
 fi
 if [ ! -f "/etc/storage/ss_ip.sh" ] ; then
 cp -rf /etc_ro/ss_ip.sh /etc/storage/
-chmod 755 "/etc/storage/ss_ip..sh"
+chmod 755 "/etc/storage/ss_ip.sh"
 fi
 if [ ! -f "/etc/storage/ss_lan_bip.sh" ] ; then
 cp -rf /etc_ro/ss_lan_bip.sh /etc/storage/
-chmod 755 "/etc/storage/ss_lan_bip..sh"
+chmod 755 "/etc/storage/ss_lan_bip.sh"
 fi
 if [ ! -f "/etc/storage/ss_lan_ip.sh" ] ; then
 cp -rf /etc_ro/ss_lan_ip.sh /etc/storage/
-chmod 755 "/etc/storage/ss_lan_ip..sh"
+chmod 755 "/etc/storage/ss_lan_ip.sh"
 fi
 if [ ! -f "/etc/storage/ss_wan_ip.sh" ] ; then
 cp -rf /etc_ro/ss_wan_ip.sh /etc/storage/
-chmod 755 "/etc/storage/ss_wan_ip..sh"
+chmod 755 "/etc/storage/ss_wan_ip.sh"
 fi
 if [ ! -f "/etc/storage/dnsmasq.oversea/oversea_list.conf" ] ; then
 mkdir -p /etc/storage/dnsmasq.oversea
 cp -rf /etc_ro/oversea_list.conf /etc/storage/dnsmasq.oversea/
 chmod 755 "/etc/storage/dnsmasq.oversea/oversea_list.conf"
 fi
-if [ ! -f "/etc/storage/gfwlist/gfwlist_list.conf" ] ; then
-mkdir -p /etc/storage/gfwlist
-cp -rf /etc_ro/gfwlist_list.conf /etc/storage/gfwlist/
-chmod 755 "/etc/storage/gfwlist/gfwlist_list.conf"
-fi
+#if [ ! -f "/etc/storage/gfwlist/gfwlist_list.conf" ] ; then
+#mkdir -p /etc/storage/gfwlist
+#cp -rf /etc_ro/gfwlist_list.conf /etc/storage/gfwlist/
+#chmod 755 "/etc/storage/gfwlist/gfwlist_list.conf"
+#fi
