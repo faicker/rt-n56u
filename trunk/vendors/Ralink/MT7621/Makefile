@@ -82,7 +82,7 @@ romfs.post::
 	rm -f $(RAMDISK)
 	rm -f $(KERNELZ).lzma
 ifeq ($(CONFIG_RT2880_ROOTFS_IN_FLASH),y)
-	$(ROOTDIR)/tools/mksquashfs_xz/mksquashfs $(ROMFSDIR) $(RAMDISK) -all-root -no-exports -noappend -nopad -noI -no-xattrs
+	$(ROOTDIR)/tools/mksquashfs_xz/mksquashfs $(ROMFSDIR) $(RAMDISK) -all-root -no-exports -noappend -nopad -noI -no-xattrs -b 1M
 endif
 
 image:

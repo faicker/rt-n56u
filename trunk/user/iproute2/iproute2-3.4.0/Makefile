@@ -38,7 +38,7 @@ CFLAGS += -D_GNU_SOURCE $(DEFINES)
 CFLAGS += -ffunction-sections -fdata-sections
 YACCFLAGS = -d -t -v
 
-SUBDIRS=lib tc
+SUBDIRS=lib tc misc netem
 ifdef CONFIG_IPV6
 	SUBDIRS += ip
 endif

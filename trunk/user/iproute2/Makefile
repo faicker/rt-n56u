@@ -26,4 +26,9 @@ ifeq ($(CONFIG_FIRMWARE_INCLUDE_QOS),y)
 endif
 ifdef CONFIG_IPV6
 	$(ROMFSINST) $(THISDIR)/$(SRC_NAME)/ip/ip /bin/ip
+	$(ROMFSINST) $(THISDIR)/$(SRC_NAME)/misc/ss /bin/ss
+	$(ROMFSINST) $(THISDIR)/$(SRC_NAME)/misc/ifstat /bin/ifstat
+	$(ROMFSINST) $(THISDIR)/$(SRC_NAME)/misc/lnstat /bin/lnstat
+	$(ROMFSINST) $(THISDIR)/$(SRC_NAME)/misc/nstat /bin/nstat
+	$(ROMFSINST) $(THISDIR)/$(SRC_NAME)/misc/rtacct /bin/rtacct
 endif
