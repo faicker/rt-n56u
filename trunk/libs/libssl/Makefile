@@ -15,7 +15,7 @@ LOPTS=-Wl,--gc-sections -L$(DESTDIR)/lib
 OPENSSL_OPTIONS = no-capieng no-cms no-rfc3779 no-seed no-async \
                   no-ec2m no-err no-idea no-rc5 no-rmd160 no-blake2 \
                   no-static-engine no-hw-padlock no-md2 no-sse2 no-dso no-ts no-mdc2 \
-                  no-cast no-whirlpool no-sctp no-srp no-ssl3 \
+                  no-cast no-whirlpool no-sctp no-ssl3 \
                   no-aria no-sm2 no-sm3 no-sm4
 
 ifneq ($(CONFIG_FIRMWARE_INCLUDE_TOR),y)
@@ -26,9 +26,9 @@ endif
 #OPENSSL_OPTIONS += enable-devcryptoeng
 #else
 OPENSSL_OPTIONS += no-hw no-devcryptoeng
-ifneq ($(CONFIG_FIRMWARE_INCLUDE_TOR),y)
-OPENSSL_OPTIONS += no-engine
-endif
+#ifneq ($(CONFIG_FIRMWARE_INCLUDE_TOR),y)
+#OPENSSL_OPTIONS += no-engine
+#endif
 #endif
 
 ifneq ($(CONFIG_FIRMWARE_INCLUDE_SSWAN),y)

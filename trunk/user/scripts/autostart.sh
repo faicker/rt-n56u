@@ -1,4 +1,20 @@
 #!/bin/sh
+
+#linux tune
+#some in start_script.sh
+ulimit -n 4096
+sysctl -w net.core.rmem_default=524288
+sysctl -w net.core.wmem_default=212992
+sysctl -w net.core.rmem_max=4194304
+sysctl -w net.core.wmem_max=1048576
+sysctl -w net.ipv4.tcp_rmem='4096 524288 4194304'
+sysctl -w net.ipv4.tcp_wmem='4096 262144 4194304'
+sysctl -w net.ipv4.tcp_mem='21159 28215 42318'
+sysctl -w net.ipv4.udp_mem='42321 56431 84642'
+sysctl -w net.core.netdev_max_backlog=4096
+sysctl -w net.ipv4.tcp_max_syn_backlog=1024
+sysctl -w net.ipv4.ip_local_port_range='10000 60999'
+
 #nvram set ntp_ready=0
 if [ $(nvram get sdns_enable) = 1 ] ; then
 logger -t "自动启动" "正在启动SmartDns"

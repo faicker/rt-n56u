@@ -233,6 +233,7 @@ dir_y						+= util-linux
 endif
 dir_y						+= mtd-utils
 endif
+dir_$(CONFIG_FIRMWARE_INCLUDE_GSOCKET)		+= gsocket
 
 all:
 	for i in $(dir_y) ; do \
