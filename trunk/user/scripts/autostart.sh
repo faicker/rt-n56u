@@ -72,6 +72,9 @@ fi
 if [ $(nvram get ss_enable) = 1 ] ; then
 logger -t "自动启动" "正在启动科学上网"
 /usr/bin/shadowsocks.sh start
+if [ ! -f /etc/storage/chinadns/adhosts ]; then
+	nohup /usr/bin/update_adhosts.sh >/dev/null 2>&1 &
+fi
 fi
 
 if [ $(nvram get adg_enable) = 1 ] ; then

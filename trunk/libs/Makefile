@@ -190,6 +190,11 @@ LIBS_INCLUDE_LIBPCAP=y
 LIBS_INCLUDE_LIBICONV=y
 endif
 
+ifeq ($(CONFIG_FIRMWARE_INCLUDE_XFRPC),y)
+LIBS_INCLUDE_LIBJSON_C=y
+LIBS_INCLUDE_LIBEV=y
+endif
+
 dir_y						+= libz
 dir_$(LIBS_INCLUDE_NCURSES)			+= libncurses
 dir_$(LIBS_INCLUDE_LIBLZO)			+= liblzo
@@ -227,6 +232,7 @@ dir_$(LIBS_INCLUDE_MEDIA)			+= libsqlite
 
 # transmission shared libs
 dir_$(CONFIG_FIRMWARE_INCLUDE_TRANSMISSION)	+= libevent
+dir_$(CONFIG_FIRMWARE_INCLUDE_XFRPC)		+= libevent
 
 # aria2 shared libs
 dir_$(LIBS_INCLUDE_LIBXML2)		+= libxml2

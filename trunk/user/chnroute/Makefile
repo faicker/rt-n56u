@@ -1,4 +1,4 @@
-url = https://cdn.jsdelivr.net/gh/misakaio/chnroutes2@master/chnroutes.txt
+url = https://fastly.jsdelivr.net/gh/misakaio/chnroutes2@master/chnroutes.txt
 THISDIR = $(shell pwd)
 
 all :

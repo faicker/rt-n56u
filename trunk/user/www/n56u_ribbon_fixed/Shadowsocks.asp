@@ -1827,6 +1827,7 @@ setTimeout('document.getElementById("btn_ctime").style.display="none";',1000);
 																	<option value="rc4">rc4</option>
 																	<option value="rc4-md5">rc4-md5</option>
 																	<option value="randpre-rc4-md5">randpre-rc4-md5</option>
+																	<option value="randpre-table">randpre-table</option>
 																	<option value="aes-128-cfb">aes-128-cfb</option>
 																	<option value="aes-192-cfb">aes-192-cfb</option>
 																	<option value="aes-256-cfb">aes-256-cfb</option>
@@ -1851,8 +1852,6 @@ setTimeout('document.getElementById("btn_ctime").style.display="none";',1000);
 																	</option>
 																	<option value="chacha20-ietf-poly1305">
 																		chacha20-ietf-poly1305 (ss only)</option>
-																	<option value="randpre-chacha20-ietf-poly1305">
-																		randpre-chacha20-ietf-poly1305 (ss only)</option>
 																	<option value="xchacha20-ietf-poly1305">
 																		xchacha20-ietf-poly1305 (ss only)</option>
 																</select>

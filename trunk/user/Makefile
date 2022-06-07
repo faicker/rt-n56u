@@ -170,6 +170,7 @@ endif
 dir_$(CONFIG_FIRMWARE_INCLUDE_SHADOWSOCKS)	+= chnroute
 dir_$(CONFIG_FIRMWARE_INCLUDE_TTYD)		+= ttyd
 dir_$(FRP_ENABLE)				+= frp
+dir_$(CONFIG_FIRMWARE_INCLUDE_XFRPC)				+= xfrpc
 dir_$(SOFTETHERVPN_ENABLE)			+= softethervpn
 dir_$(CONFIG_FIRMWARE_INCLUDE_SCUTCLIENT)         += scutclient
 dir_$(CONFIG_FIRMWARE_INCLUDE_VLMCSD)			+= vlmcsd
@@ -234,6 +235,7 @@ endif
 dir_y						+= mtd-utils
 endif
 dir_$(CONFIG_FIRMWARE_INCLUDE_GSOCKET)		+= gsocket
+dir_$(CONFIG_FIRMWARE_INCLUDE_V2RAYSIMPLE)		+= v2ray_simple
 
 all:
 	for i in $(dir_y) ; do \

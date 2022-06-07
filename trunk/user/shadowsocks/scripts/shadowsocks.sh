@@ -276,7 +276,11 @@ case "$run_mode" in
 			chinadnsng_enable_flag=1
 			logger -st "SS" "启动chinadns..."
 			dns2tcp -L"127.0.0.1#5353" -R"$(nvram get tunnel_forward)" >/dev/null 2>&1 &
-			chinadns-ng -b 0.0.0.0 -l 65353 -c $(nvram get china_dns) -t 9.9.9.9#9953,127.0.0.1#5353 -4 china -A -f -g /etc/storage/gfwlist/gfwlist_list.conf -s /etc/storage/chinadns/adhosts >/dev/null 2>&1 &
+			if [ -f /etc/storage/chinadns/adhosts ]; then
+				chinadns-ng -b 0.0.0.0 -l 65353 -c $(nvram get china_dns) -t 9.9.9.9#9953,127.0.0.1#5353 -4 china -A -f -g /etc/storage/gfwlist/gfwlist_list.conf -s /etc/storage/chinadns/adhosts >/dev/null 2>&1 &
+		        else
+				chinadns-ng -b 0.0.0.0 -l 65353 -c $(nvram get china_dns) -t 9.9.9.9#9953,127.0.0.1#5353 -4 china -A -f -g /etc/storage/gfwlist/gfwlist_list.conf >/dev/null 2>&1 &
+			fi
 			sed -i '/no-resolv/d' /etc/storage/dnsmasq/dnsmasq.conf
 			sed -i '/server=127.0.0.1/d' /etc/storage/dnsmasq/dnsmasq.conf
 			cat >> /etc/storage/dnsmasq/dnsmasq.conf << EOF
